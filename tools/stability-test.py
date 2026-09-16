@@ -18,6 +18,7 @@ loader.exec_module(ctl)
 SITES = [
     ("Google", "https://www.google.com/"),
     ("YouTube", "https://www.youtube.com/"),
+    ("YouTube Music", "https://music.youtube.com/"),
     ("Facebook", "https://www.facebook.com/"),
     ("Instagram", "https://www.instagram.com/"),
     ("X", "https://x.com/"),

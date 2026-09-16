@@ -59,10 +59,11 @@ current view; separate popup windows are not implemented.
   per-process target. Cleanup starts before the target is reached. Override it
   with `--memory-limit MIB` (128–65536); this is a pressure target rather than a
   hard allocation cap.
-- `--low-memory` selects a 384 MiB target, disables automatic images, media,
-  Media Source, encrypted media, WebAudio, WebRTC, WebGL, and accelerated 2D
-  canvas. JavaScript remains enabled, but media and graphics-heavy sites lose
-  features. An explicit `--memory-limit` overrides its 384 MiB default. The
+- `--low-memory` selects a 384 MiB target and disables automatic images, WebRTC,
+  WebGL, and accelerated 2D canvas. Audio, video, Media Source, encrypted media,
+  WebAudio, and JavaScript remain enabled so streaming sites can still function.
+  Video-conferencing and graphics-heavy sites lose features. An explicit
+  `--memory-limit` overrides its 384 MiB default. The
   pressure handler releases critical caches but does not automatically kill an
   oversized page; use `lightviewctl reset` between heavy workflows when needed.
 

@@ -247,6 +247,9 @@ class BrowserIntegration(unittest.TestCase):
                 webgl = self.cli(path, "eval",
                     "Boolean(document.createElement('canvas').getContext('webgl'))")
                 self.assertFalse(webgl)
+                media_apis = self.cli(path, "eval",
+                    "({audioContext: typeof AudioContext, mediaSource: typeof MediaSource})")
+                self.assertEqual(media_apis, {"audioContext": "function", "mediaSource": "function"})
 
 
 if __name__ == "__main__":
