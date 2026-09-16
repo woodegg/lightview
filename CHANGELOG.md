@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.1.1 - 2026-09-16
+
+### Fixed
+
+- Keep media playback, MediaSource, encrypted media, and WebAudio enabled in
+  low-memory mode. This prevents a WebKitGTK crash when opening and playing
+  media on sites such as YouTube Music.
+- Include YouTube Music in the multi-site stability test and verify the media
+  APIs required by playback in the low-memory integration test.
+
 ## 0.1.0 - 2026-09-16
 
 Initial release of Lightview, a small GTK 3 and WebKitGTK browser for Linux.

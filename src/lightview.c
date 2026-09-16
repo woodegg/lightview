@@ -463,7 +463,7 @@ int main(int argc, char **argv)
         g_printerr("%s\n", error->message); return 1;
     }
     if (version) {
-        g_print("Lightview 0.1.0 (WebKitGTK %u.%u.%u)\n", webkit_get_major_version(),
+        g_print("Lightview 0.1.1 (WebKitGTK %u.%u.%u)\n", webkit_get_major_version(),
             webkit_get_minor_version(), webkit_get_micro_version());
         return 0;
     }
