@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<gresources>
+  <gresource prefix="/io/github/darkoffices/lightview">
+    <file alias="lightview.png">lightview.png</file>
+  </gresource>
+</gresources>

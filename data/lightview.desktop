@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Lightview
+Comment=Lightweight scriptable WebKit browser
+Exec=lightview %u
+Icon=lightview
+Terminal=false
+Categories=Network;WebBrowser;
+MimeType=text/html;x-scheme-handler/http;x-scheme-handler/https;
+StartupWMClass=lightview
