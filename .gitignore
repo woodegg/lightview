@@ -4,3 +4,4 @@ __pycache__/
 /*_connections.csv
 /stability-results*.csv
 /data/lightview-source.png
+/dist/
