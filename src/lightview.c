@@ -463,7 +463,7 @@ int main(int argc, char **argv)
         g_printerr("%s\n", error->message); return 1;
     }
     if (version) {
-        g_print("Lightview 0.1.2 (WebKitGTK %u.%u.%u)\n", webkit_get_major_version(),
+        g_print("Lightview 0.1.3 (WebKitGTK %u.%u.%u)\n", webkit_get_major_version(),
             webkit_get_minor_version(), webkit_get_micro_version());
         return 0;
     }
@@ -512,7 +512,9 @@ int main(int argc, char **argv)
         "website-data-manager", manager,
         "memory-pressure-settings", pressure,
         NULL);
-    webkit_web_context_set_sandbox_enabled(context, TRUE);
+    const char *disable_sandbox = g_getenv("WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS");
+    webkit_web_context_set_sandbox_enabled(context,
+        !(disable_sandbox && g_str_equal(disable_sandbox, "1")));
     webkit_web_context_set_cache_model(context, browser_cache ?
         WEBKIT_CACHE_MODEL_WEB_BROWSER : WEBKIT_CACHE_MODEL_DOCUMENT_VIEWER);
     webkit_web_context_set_spell_checking_enabled(context, FALSE);

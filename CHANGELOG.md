@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.3 - 2026-09-16
+
+### Fixed
+
+- Keep WebKit's context sandbox state consistent with the required
+  `WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS=1` override on restricted
+  containers. This prevents the delayed native crash after YouTube navigation.
+
 ## 0.1.2 - 2026-09-16
 
 ### Fixed
