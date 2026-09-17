@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.5 - 2026-09-16
+
+### Fixed
+
+- Translate the unsafe `WEBKIT_DISABLE_DMABUF_RENDERER=1` legacy override to
+  WebKitGTK's shared-memory renderer. WebKitGTK 2.52 can otherwise dereference
+  a null accelerated backing store when a YouTube video creates a composited
+  layer.
+
 ## 0.1.4 - 2026-09-16
 
 ### Fixed
