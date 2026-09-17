@@ -463,7 +463,7 @@ int main(int argc, char **argv)
         g_printerr("%s\n", error->message); return 1;
     }
     if (version) {
-        g_print("Lightview 0.1.1 (WebKitGTK %u.%u.%u)\n", webkit_get_major_version(),
+        g_print("Lightview 0.1.2 (WebKitGTK %u.%u.%u)\n", webkit_get_major_version(),
             webkit_get_minor_version(), webkit_get_micro_version());
         return 0;
     }
@@ -542,8 +542,26 @@ int main(int argc, char **argv)
     gtk_box_pack_start(GTK_BOX(toolbar), b.forward, FALSE, FALSE, 0);
     gtk_box_pack_start(GTK_BOX(toolbar), refresh, FALSE, FALSE, 0);
     gtk_box_pack_start(GTK_BOX(toolbar), b.entry, TRUE, TRUE, 0);
+    g_autoptr(WebKitUserContentManager) content = webkit_user_content_manager_new();
+    const char *youtube_navigation_workaround =
+        "document.addEventListener('click',event=>{"
+        "if(!event.isTrusted||event.defaultPrevented||event.button!==0||event.ctrlKey||"
+        "event.metaKey||event.shiftKey||event.altKey||!/(^|\\.)youtube\\.com$/.test(location.hostname))return;"
+        "const anchor=event.target.closest?.('a[href]');"
+        "if(!anchor||anchor.hasAttribute('download')||(anchor.target&&anchor.target!=='_self'))return;"
+        "const url=new URL(anchor.href,location.href);"
+        "if(url.protocol!=='http:'&&url.protocol!=='https:')return;"
+        "event.preventDefault();event.stopImmediatePropagation();"
+        "setTimeout(()=>location.assign(url.href),0);"
+        "},true);";
+    WebKitUserScript *navigation_script = webkit_user_script_new(youtube_navigation_workaround,
+        WEBKIT_USER_CONTENT_INJECT_TOP_FRAME, WEBKIT_USER_SCRIPT_INJECT_AT_DOCUMENT_START,
+        NULL, NULL);
+    webkit_user_content_manager_add_script(content, navigation_script);
+    webkit_user_script_unref(navigation_script);
     b.view = WEBKIT_WEB_VIEW(g_object_new(WEBKIT_TYPE_WEB_VIEW,
-        "web-context", context, "settings", settings, NULL));
+        "web-context", context, "settings", settings,
+        "user-content-manager", content, NULL));
     b.message = gtk_label_new(NULL);
     gtk_label_set_ellipsize(GTK_LABEL(b.message), PANGO_ELLIPSIZE_END);
     gtk_label_set_xalign(GTK_LABEL(b.message), 0);

@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.2 - 2026-09-16
+
+### Fixed
+
+- Route trusted YouTube link clicks through programmatic navigation to avoid a
+  WebKitGTK 2.52 native crash when choosing entries from YouTube's Guide.
+
 ## 0.1.1 - 2026-09-16
 
 ### Fixed
