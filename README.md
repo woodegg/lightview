@@ -215,8 +215,9 @@ your distribution.
 
 Do not use `WEBKIT_DISABLE_DMABUF_RENDERER=1` with WebKitGTK 2.52. It can leave
 the accelerated backing store without a buffer transport and crash when media
-or another composited layer appears. Lightview translates that legacy setting
-to `WEBKIT_DMABUF_RENDERER_FORCE_SHM=1` at startup for compatibility.
+or another composited layer appears. Lightview removes that legacy setting and
+selects `WEBKIT_DMABUF_RENDERER_FORCE_SHM=1` by default. The shared-memory path
+also keeps media compositing stable in containers without usable DRM devices.
 
 There are currently no tabs, downloads UI, bookmarks, password manager, popup
 windows, or permission prompts for camera/microphone/location. Website requests

@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.6 - 2026-09-16
+
+### Fixed
+
+- Default to WebKitGTK's shared-memory renderer. This also prevents the null
+  accelerated-backing-store crash in containers where no renderer override was
+  inherited and the default DMABUF path could not use a DRM device.
+
 ## 0.1.5 - 2026-09-16
 
 ### Fixed

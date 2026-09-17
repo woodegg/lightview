@@ -489,10 +489,10 @@ int main(int argc, char **argv)
      * when this legacy switch is used, then dereferences it when media or other
      * content first requests compositing. Preserve the intended software path
      * by selecting the shared-memory renderer explicitly. */
-    if (g_getenv("WEBKIT_DISABLE_DMABUF_RENDERER")) {
+    if (g_getenv("WEBKIT_DISABLE_DMABUF_RENDERER"))
         g_unsetenv("WEBKIT_DISABLE_DMABUF_RENDERER");
+    if (!g_getenv("WEBKIT_DMABUF_RENDERER_FORCE_SHM"))
         g_setenv("WEBKIT_DMABUF_RENDERER_FORCE_SHM", "1", FALSE);
-    }
     Browser b = {0};
     gboolean no_control = FALSE, no_images = FALSE, browser_cache = FALSE, version = FALSE;
     gint memory_limit = 0;
@@ -518,7 +518,7 @@ int main(int argc, char **argv)
         g_printerr("%s\n", error->message); return 1;
     }
     if (version) {
-        g_print("Lightview 0.1.5 (WebKitGTK %u.%u.%u)\n", webkit_get_major_version(),
+        g_print("Lightview 0.1.6 (WebKitGTK %u.%u.%u)\n", webkit_get_major_version(),
             webkit_get_minor_version(), webkit_get_micro_version());
         return 0;
     }
