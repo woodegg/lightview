@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.4 - 2026-09-16
+
+### Fixed
+
+- Route trusted YouTube link clicks through a native UI-process message before
+  starting navigation. This avoids the delayed WebKitGTK fault that could still
+  follow repeated Guide navigation with the 0.1.3 page-side workaround.
+
 ## 0.1.3 - 2026-09-16
 
 ### Fixed

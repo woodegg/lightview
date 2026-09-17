@@ -187,6 +187,53 @@ static gboolean navigate(Browser *b, const char *input)
     return TRUE;
 }
 
+typedef struct {
+    Browser *browser;
+    char *uri;
+} PendingNavigation;
+
+static gboolean youtube_uri(const char *uri)
+{
+    g_autoptr(GError) error = NULL;
+    g_autoptr(GUri) parsed = g_uri_parse(uri, G_URI_FLAGS_NONE, &error);
+    if (!parsed) return FALSE;
+    const char *scheme = g_uri_get_scheme(parsed);
+    const char *host = g_uri_get_host(parsed);
+    return scheme && host &&
+        (g_ascii_strcasecmp(scheme, "http") == 0 || g_ascii_strcasecmp(scheme, "https") == 0) &&
+        (g_ascii_strcasecmp(host, "youtube.com") == 0 || g_str_has_suffix(host, ".youtube.com"));
+}
+
+static gboolean navigate_pending(gpointer data)
+{
+    PendingNavigation *pending = data;
+    navigate(pending->browser, pending->uri);
+    return G_SOURCE_REMOVE;
+}
+
+static void pending_navigation_free(gpointer data)
+{
+    PendingNavigation *pending = data;
+    g_free(pending->uri);
+    g_free(pending);
+}
+
+static void youtube_navigation_message(WebKitUserContentManager *manager,
+                                       WebKitJavascriptResult *result, gpointer data)
+{
+    (void)manager;
+    Browser *b = data;
+    JSCValue *value = webkit_javascript_result_get_js_value(result);
+    if (!jsc_value_is_string(value)) return;
+    g_autofree char *uri = jsc_value_to_string(value);
+    if (!youtube_uri(webkit_web_view_get_uri(b->view)) || !youtube_uri(uri)) return;
+    PendingNavigation *pending = g_new0(PendingNavigation, 1);
+    pending->browser = b;
+    pending->uri = g_steal_pointer(&uri);
+    g_idle_add_full(G_PRIORITY_DEFAULT_IDLE, navigate_pending, pending,
+        pending_navigation_free);
+}
+
 static void javascript_done(GObject *object, GAsyncResult *result, gpointer data)
 {
     Request *r = data;
@@ -463,7 +510,7 @@ int main(int argc, char **argv)
         g_printerr("%s\n", error->message); return 1;
     }
     if (version) {
-        g_print("Lightview 0.1.3 (WebKitGTK %u.%u.%u)\n", webkit_get_major_version(),
+        g_print("Lightview 0.1.4 (WebKitGTK %u.%u.%u)\n", webkit_get_major_version(),
             webkit_get_minor_version(), webkit_get_micro_version());
         return 0;
     }
@@ -545,6 +592,9 @@ int main(int argc, char **argv)
     gtk_box_pack_start(GTK_BOX(toolbar), refresh, FALSE, FALSE, 0);
     gtk_box_pack_start(GTK_BOX(toolbar), b.entry, TRUE, TRUE, 0);
     g_autoptr(WebKitUserContentManager) content = webkit_user_content_manager_new();
+    g_signal_connect(content, "script-message-received::navigation",
+        G_CALLBACK(youtube_navigation_message), &b);
+    webkit_user_content_manager_register_script_message_handler(content, "navigation");
     const char *youtube_navigation_workaround =
         "document.addEventListener('click',event=>{"
         "if(!event.isTrusted||event.defaultPrevented||event.button!==0||event.ctrlKey||"
@@ -554,7 +604,7 @@ int main(int argc, char **argv)
         "const url=new URL(anchor.href,location.href);"
         "if(url.protocol!=='http:'&&url.protocol!=='https:')return;"
         "event.preventDefault();event.stopImmediatePropagation();"
-        "setTimeout(()=>location.assign(url.href),0);"
+        "window.webkit.messageHandlers.navigation.postMessage(url.href);"
         "},true);";
     WebKitUserScript *navigation_script = webkit_user_script_new(youtube_navigation_workaround,
         WEBKIT_USER_CONTENT_INJECT_TOP_FRAME, WEBKIT_USER_SCRIPT_INJECT_AT_DOCUMENT_START,
