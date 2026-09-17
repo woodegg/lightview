@@ -45,6 +45,10 @@ an absolute local HTML path. Bare hostnames use HTTPS. There is no search engine
 integration. User-initiated links targeting a new window are opened in the
 current view; separate popup windows are not implemented.
 
+Downloads save automatically to the user's standard Downloads directory. If a
+filename already exists, Lightview adds a numeric suffix instead of overwriting
+it. Completion or failure appears in the status bar, with no destination prompt.
+
 ## Memory choices
 
 - One native window and one WebKit view, with no tab manager, extension host,
@@ -59,9 +63,9 @@ current view; separate popup windows are not implemented.
   per-process target. Cleanup starts before the target is reached. Override it
   with `--memory-limit MIB` (128–65536); this is a pressure target rather than a
   hard allocation cap.
-- `--low-memory` selects a 384 MiB target and disables automatic images, WebRTC,
-  WebGL, and accelerated 2D canvas. Audio, video, Media Source, encrypted media,
-  WebAudio, and JavaScript remain enabled so streaming sites can still function.
+- `--low-memory` selects a 384 MiB target and disables WebRTC, WebGL, and
+  accelerated 2D canvas. Images, audio, video, Media Source, encrypted media,
+  WebAudio, and JavaScript remain enabled so ordinary and streaming sites work.
   Video-conferencing and graphics-heavy sites lose features. An explicit
   `--memory-limit` overrides its 384 MiB default. The
   pressure handler releases critical caches but does not automatically kill an
@@ -219,7 +223,7 @@ or another composited layer appears. Lightview removes that legacy setting and
 selects `WEBKIT_DMABUF_RENDERER_FORCE_SHM=1` by default. The shared-memory path
 also keeps media compositing stable in containers without usable DRM devices.
 
-There are currently no tabs, downloads UI, bookmarks, password manager, popup
+There are currently no tabs, download manager UI, bookmarks, password manager, popup
 windows, or permission prompts for camera/microphone/location. Website requests
 that need unimplemented permission UI retain WebKit's default behavior. Major
 site login, video codecs, DRM, accessibility, and long-session memory behavior

@@ -24,6 +24,8 @@ PAGE = b"""<!doctype html><meta charset="utf-8"><title>Lightview test</title>
 <input id="field"><textarea id="notes"></textarea>
 <button id="button" onclick="this.textContent='clicked'">Click</button>
 <a id="next" href="/next" target="_blank">Next</a>
+<a id="download" href="/download">Download</a>
+<img id="image" src="/image.svg" alt="fixture">
 <script type="module">
 const answer = await fetch('/api').then(response => response.json());
 document.body.dataset.answer = answer.value?.toString() ?? 'missing';
@@ -37,10 +39,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == "/api":
             payload, content_type = b'{"value":42}', "application/json"
+        elif self.path == "/download":
+            payload, content_type = b"download fixture\n", "application/octet-stream"
+        elif self.path == "/image.svg":
+            payload = b'<svg xmlns="http://www.w3.org/2000/svg" width="8" height="6"><rect width="8" height="6" fill="green"/></svg>'
+            content_type = "image/svg+xml"
         else:
             payload, content_type = PAGE, "text/html; charset=utf-8"
         self.send_response(200)
         self.send_header("Content-Type", content_type)
+        if self.path == "/download":
+            self.send_header("Content-Disposition", 'attachment; filename="fixture.txt"')
         self.send_header("Content-Length", str(len(payload)))
         self.end_headers()
         self.wfile.write(payload)
@@ -244,12 +253,40 @@ class BrowserIntegration(unittest.TestCase):
                 self.assertTrue(state["low_memory"])
                 self.assertEqual(state["memory_limit_mib"], 384)
                 self.cli(path, "open", self.url, "--wait")
+                self.cli(path, "wait",
+                    "document.querySelector('#image').complete && document.querySelector('#image').naturalWidth === 8")
                 webgl = self.cli(path, "eval",
                     "Boolean(document.createElement('canvas').getContext('webgl'))")
                 self.assertFalse(webgl)
                 media_apis = self.cli(path, "eval",
                     "({audioContext: typeof AudioContext, mediaSource: typeof MediaSource})")
                 self.assertEqual(media_apis, {"audioContext": "function", "mediaSource": "function"})
+
+    def test_downloads_save_automatically(self):
+        with tempfile.TemporaryDirectory(prefix="lightview-test-") as directory:
+            fake_home = Path(directory) / "home"
+            downloads = fake_home / "Downloads"
+            fake_home.mkdir()
+            old_home = os.environ.get("HOME")
+            os.environ["HOME"] = str(fake_home)
+            try:
+                with browser(directory, "--private") as (path, _):
+                    state = self.cli(path, "status")
+                    self.assertEqual(Path(state["download_dir"]), downloads)
+                    self.cli(path, "open", self.url, "--wait")
+                    self.cli(path, "click", "#download")
+                    target = downloads / "fixture.txt"
+                    deadline = time.monotonic() + 10
+                    while not target.exists():
+                        self.assertLess(time.monotonic(), deadline, "Download did not finish")
+                        time.sleep(0.1)
+                    self.assertEqual(target.read_bytes(), b"download fixture\n")
+                    self.assertEqual(self.cli(path, "status")["downloads_active"], 0)
+            finally:
+                if old_home is None:
+                    os.environ.pop("HOME", None)
+                else:
+                    os.environ["HOME"] = old_home
 
 
 if __name__ == "__main__":

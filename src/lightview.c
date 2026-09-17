@@ -22,8 +22,8 @@ typedef struct {
     GtkWidget *window, *entry, *back, *forward, *message;
     WebKitWebView *view;
     GSocketService *service;
-    char *socket_path, *load_error;
-    guint clients, memory_limit;
+    char *socket_path, *load_error, *download_dir, *download_message;
+    guint clients, memory_limit, downloads_active;
     gboolean private_mode, low_memory, resetting;
 } Browser;
 
@@ -115,10 +115,11 @@ static void update_ui(Browser *b)
         gtk_entry_set_text(GTK_ENTRY(b->entry), uri ? uri : "");
     gtk_widget_set_sensitive(b->back, webkit_web_view_can_go_back(b->view));
     gtk_widget_set_sensitive(b->forward, webkit_web_view_can_go_forward(b->view));
-    gtk_label_set_text(GTK_LABEL(b->message), b->load_error ? b->load_error :
-        (webkit_web_view_is_loading(b->view) ? "Loading…" : ""));
-    gtk_widget_set_visible(b->message,
-        b->load_error != NULL || webkit_web_view_is_loading(b->view));
+    gboolean loading = webkit_web_view_is_loading(b->view);
+    const char *message = b->load_error ? b->load_error :
+        (loading ? "Loading…" : b->download_message);
+    gtk_label_set_text(GTK_LABEL(b->message), message ? message : "");
+    gtk_widget_set_visible(b->message, message != NULL);
 }
 
 static void notify_view(GObject *object, GParamSpec *pspec, gpointer data)
@@ -146,6 +147,119 @@ static gboolean load_failed(WebKitWebView *view, WebKitLoadEvent event,
     b->load_error = g_strdup(error->message);
     update_ui(b);
     return TRUE;
+}
+
+static char *safe_download_name(const char *suggested)
+{
+    g_autofree char *basename = g_path_get_basename(
+        suggested && *suggested ? suggested : "download");
+    if (g_str_equal(basename, ".") || g_str_equal(basename, "..") || !*basename)
+        return g_strdup("download");
+    for (char *p = basename; *p; p++)
+        if (*p == '/' || *p == '\\' || ((guchar)*p < 0x20) || *p == 0x7f) *p = '_';
+    return g_steal_pointer(&basename);
+}
+
+static char *available_download_path(Browser *b, const char *suggested)
+{
+    g_autofree char *name = safe_download_name(suggested);
+    char *dot = strrchr(name, '.');
+    g_autofree char *stem = NULL;
+    const char *suffix = "";
+    if (dot && dot != name) {
+        stem = g_strndup(name, dot - name);
+        suffix = dot;
+    } else stem = g_strdup(name);
+    for (guint n = 0; n < 10000; n++) {
+        g_autofree char *candidate_name = n == 0 ? g_strdup(name) :
+            g_strdup_printf("%s (%u)%s", stem, n, suffix);
+        char *candidate = g_build_filename(b->download_dir, candidate_name, NULL);
+        if (!g_file_test(candidate, G_FILE_TEST_EXISTS)) return candidate;
+        g_free(candidate);
+    }
+    return NULL;
+}
+
+static gboolean decide_download_destination(WebKitDownload *download,
+                                             const char *suggested, gpointer data)
+{
+    Browser *b = data;
+    g_autofree char *path = available_download_path(b, suggested);
+    if (!path) {
+        webkit_download_cancel(download);
+        g_free(b->download_message);
+        b->download_message = g_strdup("Download failed: no available filename");
+        update_ui(b);
+        return TRUE;
+    }
+    g_autoptr(GError) error = NULL;
+    g_autofree char *uri = g_filename_to_uri(path, NULL, &error);
+    if (!uri) {
+        webkit_download_cancel(download);
+        g_free(b->download_message);
+        b->download_message = g_strdup_printf("Download failed: %s", error->message);
+        update_ui(b);
+        return TRUE;
+    }
+    webkit_download_set_allow_overwrite(download, FALSE);
+    webkit_download_set_destination(download, uri);
+    g_object_set_data_full(G_OBJECT(download), "lightview-download-path",
+        g_strdup(path), g_free);
+    g_free(b->download_message);
+    b->download_message = g_strdup_printf("Downloading %s…", suggested);
+    update_ui(b);
+    return TRUE;
+}
+
+static void download_progress(GObject *object, GParamSpec *pspec, gpointer data)
+{
+    (void)pspec;
+    Browser *b = data;
+    WebKitDownload *download = WEBKIT_DOWNLOAD(object);
+    const char *path = g_object_get_data(object, "lightview-download-path");
+    if (!path) return;
+    g_autofree char *name = g_path_get_basename(path);
+    guint percent = (guint)(webkit_download_get_estimated_progress(download) * 100.0);
+    g_free(b->download_message);
+    b->download_message = g_strdup_printf("Downloading %s (%u%%)…", name, percent);
+    update_ui(b);
+}
+
+static void download_failed(WebKitDownload *download, GError *error, gpointer data)
+{
+    Browser *b = data;
+    g_object_set_data(G_OBJECT(download), "lightview-download-failed", GINT_TO_POINTER(1));
+    g_free(b->download_message);
+    b->download_message = g_strdup_printf("Download failed: %s", error->message);
+    update_ui(b);
+}
+
+static void download_finished(WebKitDownload *download, gpointer data)
+{
+    Browser *b = data;
+    if (b->downloads_active) b->downloads_active--;
+    if (!g_object_get_data(G_OBJECT(download), "lightview-download-failed")) {
+        const char *path = g_object_get_data(G_OBJECT(download), "lightview-download-path");
+        g_free(b->download_message);
+        b->download_message = g_strdup_printf("Downloaded: %s", path ? path : b->download_dir);
+        update_ui(b);
+    }
+}
+
+static void download_started(WebKitWebContext *context, WebKitDownload *download, gpointer data)
+{
+    (void)context;
+    Browser *b = data;
+    b->downloads_active++;
+    g_free(b->download_message);
+    b->download_message = g_strdup("Preparing download…");
+    update_ui(b);
+    g_signal_connect(download, "decide-destination",
+        G_CALLBACK(decide_download_destination), b);
+    g_signal_connect(download, "notify::estimated-progress",
+        G_CALLBACK(download_progress), b);
+    g_signal_connect(download, "failed", G_CALLBACK(download_failed), b);
+    g_signal_connect(download, "finished", G_CALLBACK(download_finished), b);
 }
 
 static void process_terminated(WebKitWebView *view, WebKitWebProcessTerminationReason reason,
@@ -286,6 +400,8 @@ static void dispatch(Request *r)
         json_object_set_boolean_member(state, "private", b->private_mode);
         json_object_set_boolean_member(state, "low_memory", b->low_memory);
         json_object_set_int_member(state, "memory_limit_mib", b->memory_limit);
+        json_object_set_string_member(state, "download_dir", b->download_dir);
+        json_object_set_int_member(state, "downloads_active", b->downloads_active);
         json_object_set_int_member(state, "pid", getpid());
         if (b->load_error) json_object_set_string_member(state, "load_error", b->load_error);
         else json_object_set_null_member(state, "load_error");
@@ -518,7 +634,7 @@ int main(int argc, char **argv)
         g_printerr("%s\n", error->message); return 1;
     }
     if (version) {
-        g_print("Lightview 0.1.6 (WebKitGTK %u.%u.%u)\n", webkit_get_major_version(),
+        g_print("Lightview 0.1.7 (WebKitGTK %u.%u.%u)\n", webkit_get_major_version(),
             webkit_get_minor_version(), webkit_get_micro_version());
         return 0;
     }
@@ -530,7 +646,16 @@ int main(int argc, char **argv)
         g_printerr("--memory-limit must be between 128 and 65536 MiB.\n"); return 1;
     }
     b.memory_limit = (guint)memory_limit;
-    if (b.low_memory) no_images = TRUE;
+    const char *downloads = g_get_user_special_dir(G_USER_DIRECTORY_DOWNLOAD);
+    b.download_dir = downloads ? g_strdup(downloads) :
+        g_build_filename(g_get_home_dir(), "Downloads", NULL);
+    if (g_mkdir_with_parents(b.download_dir, 0755) != 0 ||
+        !g_file_test(b.download_dir, G_FILE_TEST_IS_DIR) ||
+        g_access(b.download_dir, W_OK) != 0) {
+        g_printerr("Download directory is not writable: %s\n", b.download_dir);
+        g_free(b.download_dir);
+        return 1;
+    }
     if (!gtk_init_check(&argc, &argv)) {
         g_printerr("A graphical display is required (XFCE/X11 or Wayland).\n"); return 1;
     }
@@ -573,6 +698,7 @@ int main(int argc, char **argv)
     webkit_web_context_set_cache_model(context, browser_cache ?
         WEBKIT_CACHE_MODEL_WEB_BROWSER : WEBKIT_CACHE_MODEL_DOCUMENT_VIEWER);
     webkit_web_context_set_spell_checking_enabled(context, FALSE);
+    g_signal_connect(context, "download-started", G_CALLBACK(download_started), &b);
     g_autoptr(WebKitSettings) settings = webkit_settings_new_with_settings(
         "enable-javascript", TRUE,
         "enable-page-cache", browser_cache,
@@ -667,5 +793,7 @@ int main(int argc, char **argv)
     if (profile_fd >= 0) close(profile_fd);
     g_free(b.socket_path);
     g_free(b.load_error);
+    g_free(b.download_dir);
+    g_free(b.download_message);
     return 0;
 }

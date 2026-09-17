@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.1.7 - 2026-09-17
+
+### Fixed
+
+- Keep images enabled in low-memory mode. `--no-images` remains available as an
+  explicit opt-in for workloads where the usability tradeoff is acceptable.
+- Save website downloads automatically to the standard Downloads directory,
+  use conflict-free filenames, and report progress, completion, or failure in
+  the status bar without opening a destination chooser.
+
 ## 0.1.6 - 2026-09-16
 
 ### Fixed
