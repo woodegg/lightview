@@ -17,25 +17,68 @@
 #define MAX_REQUEST (1024 * 1024)
 #define MAX_RESPONSE (4 * 1024 * 1024)
 #define MAX_CLIENTS 16
+#define LIGHTVIEW_VERSION "0.1.8"
+#define RECOVERY_TIMEOUT_SECONDS 10
+#define RECOVERY_BURST_SECONDS 300
+#define RECOVERY_BURST_LIMIT 2
+#define RESET_FLASH_SECONDS 5
+#define MINIMUM_KILL_THRESHOLD_MIB 3072
+
+typedef enum {
+    ENGINE_READY,
+    ENGINE_RESETTING,
+    ENGINE_RECOVERING,
+    ENGINE_FAILED
+} EngineState;
 
 typedef struct {
-    GtkWidget *window, *entry, *back, *forward, *message;
+    GtkWidget *window, *entry, *back, *forward, *message, *view_box, *telemetry;
+    GtkWidget *reset_button, *version_button, *version_dialog, *mode_toggle;
     WebKitWebView *view;
+    WebKitWebContext *context;
+    WebKitWebsiteDataManager *manager;
+    WebKitSettings *settings;
+    WebKitMemoryPressureSettings *pressure;
     GSocketService *service;
+    GList *page_requests;
     char *socket_path, *load_error, *download_dir, *download_message;
-    guint clients, memory_limit, downloads_active;
-    gboolean private_mode, low_memory, resetting;
+    char *last_committed_uri, *last_termination_reason, *last_reset_at;
+    guint clients, memory_limit, memory_kill_threshold, downloads_active;
+    guint recovery_timeout, flash_timeout;
+    guint resource_timer, resource_processes;
+    guint64 web_process_generation, reset_count;
+    guint64 memory_pss_kib, previous_cpu_ticks;
+    guint recovery_burst_count;
+    gint64 last_recovery_us, previous_cpu_sample_us;
+    double cpu_percent;
+    EngineState engine_state;
+    gboolean private_mode, low_memory, memory_limit_explicit, browser_cache, no_images;
+    gboolean sandbox_enabled, hard_reset_used, mode_toggle_syncing;
 } Browser;
 
 typedef struct {
     Browser *browser;
     GSocketConnection *connection;
     GCancellable *cancel;
+    GCancellable *operation_cancel;
     GString *input;
     char *output;
     guint timeout;
-    gboolean quit;
+    gboolean quit, page_bound, reset_cancelled;
 } Request;
+
+static void process_terminated(WebKitWebView *view,
+    WebKitWebProcessTerminationReason reason, gpointer data);
+static gboolean decide_policy(WebKitWebView *view, WebKitPolicyDecision *decision,
+    WebKitPolicyDecisionType type, gpointer data);
+static void youtube_navigation_message(WebKitUserContentManager *manager,
+    WebKitJavascriptResult *result, gpointer data);
+static void download_started(WebKitWebContext *context, WebKitDownload *download,
+    gpointer data);
+static void hard_engine_reset(Browser *b);
+static gboolean start_reset(Browser *b, const char *source);
+static gboolean switch_low_memory_mode(Browser *b, gboolean enabled);
+static void update_ui(Browser *b);
 
 static gboolean quit_browser(gpointer unused)
 {
@@ -46,10 +89,15 @@ static gboolean quit_browser(gpointer unused)
 
 static void request_free(Request *r)
 {
+    if (r->page_bound) {
+        r->browser->page_requests = g_list_remove(r->browser->page_requests, r);
+        r->page_bound = FALSE;
+    }
     if (r->timeout) g_source_remove(r->timeout);
     g_io_stream_close(G_IO_STREAM(r->connection), NULL, NULL);
     g_object_unref(r->connection);
     g_object_unref(r->cancel);
+    g_object_unref(r->operation_cancel);
     g_string_free(r->input, TRUE);
     g_free(r->output);
     r->browser->clients--;
@@ -60,6 +108,7 @@ static gboolean request_timeout(gpointer data)
 {
     Request *r = data;
     r->timeout = 0;
+    g_cancellable_cancel(r->operation_cancel);
     g_cancellable_cancel(r->cancel);
     g_io_stream_close(G_IO_STREAM(r->connection), NULL, NULL);
     /* The pending read, JavaScript, or write callback releases the request. */
@@ -74,7 +123,8 @@ static void written(GObject *object, GAsyncResult *result, gpointer data)
     request_free(r);
 }
 
-static void reply(Request *r, JsonNode *value, const char *error)
+static void reply_full(Request *r, JsonNode *value, const char *error,
+                       const char *error_code, gboolean retryable)
 {
     g_autoptr(JsonBuilder) b = json_builder_new();
     json_builder_begin_object(b);
@@ -84,17 +134,35 @@ static void reply(Request *r, JsonNode *value, const char *error)
     if (error) json_builder_add_string_value(b, error);
     else if (value) json_builder_add_value(b, json_node_copy(value));
     else json_builder_add_null_value(b);
+    if (error_code) {
+        json_builder_set_member_name(b, "error_code");
+        json_builder_add_string_value(b, error_code);
+        json_builder_set_member_name(b, "retryable");
+        json_builder_add_boolean_value(b, retryable);
+    }
     json_builder_end_object(b);
     g_autoptr(JsonNode) root = json_builder_get_root(b);
     g_autofree char *json = json_to_string(root, FALSE);
     if (strlen(json) > MAX_RESPONSE) {
-        reply(r, NULL, "Response exceeds 4 MiB; extract a smaller result");
+        reply_full(r, NULL, "Response exceeds 4 MiB; extract a smaller result",
+            "response_too_large", FALSE);
         return;
     }
     r->output = g_strconcat(json, "\n", NULL);
     g_output_stream_write_all_async(
         g_io_stream_get_output_stream(G_IO_STREAM(r->connection)),
         r->output, strlen(r->output), G_PRIORITY_DEFAULT, r->cancel, written, r);
+}
+
+static void reply(Request *r, JsonNode *value, const char *error)
+{
+    reply_full(r, value, error, NULL, FALSE);
+}
+
+static void reply_engine_unavailable(Request *r)
+{
+    reply_full(r, NULL, "WebKit engine is recovering; retry when engine_state is ready",
+        "webkit_recovering", TRUE);
 }
 
 static const char *string_member(JsonObject *o, const char *name)
@@ -104,22 +172,202 @@ static const char *string_member(JsonObject *o, const char *name)
         ? json_node_get_string(n) : NULL;
 }
 
+static const char *engine_state_name(EngineState state)
+{
+    switch (state) {
+    case ENGINE_READY: return "ready";
+    case ENGINE_RESETTING: return "resetting";
+    case ENGINE_RECOVERING: return "recovering";
+    case ENGINE_FAILED: return "failed";
+    }
+    return "failed";
+}
+
+static const char *termination_reason_name(WebKitWebProcessTerminationReason reason)
+{
+    switch (reason) {
+    case WEBKIT_WEB_PROCESS_CRASHED: return "crashed";
+    case WEBKIT_WEB_PROCESS_EXCEEDED_MEMORY_LIMIT: return "memory-limit";
+    case WEBKIT_WEB_PROCESS_TERMINATED_BY_API: return "terminated-by-api";
+    }
+    return "unknown";
+}
+
+static char *version_text(void)
+{
+    return g_strdup_printf("Lightview %s (WebKitGTK %u.%u.%u)", LIGHTVIEW_VERSION,
+        webkit_get_major_version(), webkit_get_minor_version(), webkit_get_micro_version());
+}
+
+static char *timestamp_now(void)
+{
+    g_autoptr(GDateTime) now = g_date_time_new_now_utc();
+    return g_date_time_format_iso8601(now);
+}
+
+static const char *running_mode_name(const Browser *b)
+{
+    if (b->private_mode && b->low_memory) return "Private / Low memory";
+    if (b->private_mode) return "Private";
+    if (b->low_memory) return "Low memory";
+    return "Normal";
+}
+
+static const char *running_mode_short_name(const Browser *b)
+{
+    if (b->private_mode && b->low_memory) return "P/LM";
+    if (b->private_mode) return "P";
+    if (b->low_memory) return "LM";
+    return "N";
+}
+
+static guint64 process_pss_kib(pid_t pid)
+{
+    g_autofree char *path = g_strdup_printf("/proc/%ld/smaps_rollup", (long)pid);
+    g_autofree char *contents = NULL;
+    if (g_file_get_contents(path, &contents, NULL, NULL)) {
+        g_auto(GStrv) lines = g_strsplit(contents, "\n", -1);
+        for (guint i = 0; lines[i]; i++)
+            if (g_str_has_prefix(lines[i], "Pss:"))
+                return g_ascii_strtoull(lines[i] + 4, NULL, 10);
+    }
+
+    g_free(g_steal_pointer(&contents));
+    g_free(g_steal_pointer(&path));
+    path = g_strdup_printf("/proc/%ld/statm", (long)pid);
+    if (!g_file_get_contents(path, &contents, NULL, NULL)) return 0;
+    g_auto(GStrv) fields = g_strsplit_set(contents, " \t\n", -1);
+    guint logical = 0;
+    for (guint i = 0; fields[i]; i++) {
+        if (!*fields[i]) continue;
+        if (logical++ == 1) {
+            guint64 pages = g_ascii_strtoull(fields[i], NULL, 10);
+            return pages * (guint64)sysconf(_SC_PAGESIZE) / 1024;
+        }
+    }
+    return 0;
+}
+
+static guint64 process_cpu_ticks(pid_t pid)
+{
+    g_autofree char *path = g_strdup_printf("/proc/%ld/stat", (long)pid);
+    g_autofree char *contents = NULL;
+    if (!g_file_get_contents(path, &contents, NULL, NULL)) return 0;
+    char *command_end = strrchr(contents, ')');
+    if (!command_end || command_end[1] != ' ') return 0;
+    g_auto(GStrv) fields = g_strsplit_set(command_end + 2, " \t\n", -1);
+    guint logical = 0;
+    guint64 user = 0, system = 0;
+    for (guint i = 0; fields[i]; i++) {
+        if (!*fields[i]) continue;
+        if (logical == 11) user = g_ascii_strtoull(fields[i], NULL, 10);
+        else if (logical == 12) {
+            system = g_ascii_strtoull(fields[i], NULL, 10);
+            break;
+        }
+        logical++;
+    }
+    return user + system;
+}
+
+static void collect_process_tree(pid_t pid, GHashTable *seen, guint64 *pss_kib,
+                                 guint64 *cpu_ticks, guint *processes)
+{
+    gpointer key = GINT_TO_POINTER((gint)pid);
+    if (pid <= 0 || g_hash_table_contains(seen, key)) return;
+    g_hash_table_add(seen, key);
+    (*processes)++;
+    *pss_kib += process_pss_kib(pid);
+    *cpu_ticks += process_cpu_ticks(pid);
+
+    g_autofree char *path = g_strdup_printf("/proc/%ld/task/%ld/children",
+        (long)pid, (long)pid);
+    g_autofree char *contents = NULL;
+    if (!g_file_get_contents(path, &contents, NULL, NULL)) return;
+    g_auto(GStrv) children = g_strsplit_set(contents, " \t\n", -1);
+    for (guint i = 0; children[i]; i++) {
+        if (!*children[i]) continue;
+        gint64 child = g_ascii_strtoll(children[i], NULL, 10);
+        if (child > 0 && child <= G_MAXINT)
+            collect_process_tree((pid_t)child, seen, pss_kib, cpu_ticks, processes);
+    }
+}
+
+static gboolean sample_resource_usage(gpointer data)
+{
+    Browser *b = data;
+    g_autoptr(GHashTable) seen = g_hash_table_new(g_direct_hash, g_direct_equal);
+    guint64 pss_kib = 0, cpu_ticks = 0;
+    guint processes = 0;
+    collect_process_tree(getpid(), seen, &pss_kib, &cpu_ticks, &processes);
+    gint64 now = g_get_monotonic_time();
+    long ticks_per_second = sysconf(_SC_CLK_TCK);
+    if (b->previous_cpu_sample_us && cpu_ticks >= b->previous_cpu_ticks &&
+        ticks_per_second > 0 && now > b->previous_cpu_sample_us) {
+        double elapsed = (double)(now - b->previous_cpu_sample_us) / G_USEC_PER_SEC;
+        b->cpu_percent = (double)(cpu_ticks - b->previous_cpu_ticks) * 100.0 /
+            ((double)ticks_per_second * elapsed);
+    } else b->cpu_percent = 0.0;
+    b->memory_pss_kib = pss_kib;
+    b->resource_processes = processes;
+    b->previous_cpu_ticks = cpu_ticks;
+    b->previous_cpu_sample_us = now;
+    update_ui(b);
+    return G_SOURCE_CONTINUE;
+}
+
 static void update_ui(Browser *b)
 {
-    const char *title = webkit_web_view_get_title(b->view);
-    const char *uri = webkit_web_view_get_uri(b->view);
-    g_autofree char *caption = g_strdup_printf("%s — Lightview%s",
-        title && *title ? title : "Browser", b->private_mode ? " (private)" : "");
+    const char *title = b->view ? webkit_web_view_get_title(b->view) : NULL;
+    const char *uri = b->view ? webkit_web_view_get_uri(b->view) : NULL;
+    g_autofree char *caption = g_strdup_printf(
+        "%s — Lightview · MODE:%s, %.0fM, CPU %.1f%%",
+        title && *title ? title : "Browser", running_mode_short_name(b),
+        (double)b->memory_pss_kib / 1024.0, b->cpu_percent);
     gtk_window_set_title(GTK_WINDOW(b->window), caption);
+    if (b->telemetry) {
+        g_autofree char *markup = g_markup_printf_escaped(
+            "<b>MODE:%s</b>, %.0fM, CPU %.1f%%", running_mode_short_name(b),
+            (double)b->memory_pss_kib / 1024.0, b->cpu_percent);
+        gtk_label_set_markup(GTK_LABEL(b->telemetry), markup);
+    }
     if (!gtk_widget_has_focus(b->entry))
         gtk_entry_set_text(GTK_ENTRY(b->entry), uri ? uri : "");
-    gtk_widget_set_sensitive(b->back, webkit_web_view_can_go_back(b->view));
-    gtk_widget_set_sensitive(b->forward, webkit_web_view_can_go_forward(b->view));
-    gboolean loading = webkit_web_view_is_loading(b->view);
-    const char *message = b->load_error ? b->load_error :
-        (loading ? "Loading…" : b->download_message);
+    gboolean ready = b->engine_state == ENGINE_READY && b->view;
+    gtk_widget_set_sensitive(b->entry, ready);
+    if (b->reset_button) gtk_widget_set_sensitive(b->reset_button,
+        b->engine_state != ENGINE_RESETTING && b->engine_state != ENGINE_RECOVERING);
+    if (b->mode_toggle) gtk_widget_set_sensitive(b->mode_toggle,
+        b->engine_state != ENGINE_RESETTING && b->engine_state != ENGINE_RECOVERING);
+    gtk_widget_set_sensitive(b->back, ready && webkit_web_view_can_go_back(b->view));
+    gtk_widget_set_sensitive(b->forward, ready && webkit_web_view_can_go_forward(b->view));
+    gboolean loading = b->view && webkit_web_view_is_loading(b->view);
+    const char *engine_message = NULL;
+    if (b->engine_state == ENGINE_RESETTING) engine_message = "Resetting WebKit…";
+    else if (b->engine_state == ENGINE_RECOVERING) engine_message = "Recovering WebKit…";
+    else if (b->engine_state == ENGINE_FAILED) engine_message = "WebKit recovery failed; use Reset WebKit to retry.";
+    const char *message = engine_message ? engine_message : (b->load_error ? b->load_error :
+        (loading ? "Loading…" : b->download_message));
     gtk_label_set_text(GTK_LABEL(b->message), message ? message : "");
     gtk_widget_set_visible(b->message, message != NULL);
+}
+
+static gboolean reset_flash_finished(gpointer data)
+{
+    Browser *b = data;
+    b->flash_timeout = 0;
+    gtk_style_context_remove_class(gtk_widget_get_style_context(b->entry),
+        "webkit-reset-flash");
+    return G_SOURCE_REMOVE;
+}
+
+static void flash_reset_warning(Browser *b)
+{
+    if (b->flash_timeout) g_source_remove(b->flash_timeout);
+    gtk_style_context_add_class(gtk_widget_get_style_context(b->entry),
+        "webkit-reset-flash");
+    b->flash_timeout = g_timeout_add_seconds(RESET_FLASH_SECONDS,
+        reset_flash_finished, b);
 }
 
 static void notify_view(GObject *object, GParamSpec *pspec, gpointer data)
@@ -128,11 +376,34 @@ static void notify_view(GObject *object, GParamSpec *pspec, gpointer data)
     update_ui(data);
 }
 
+static void complete_recovery(Browser *b)
+{
+    if (b->recovery_timeout) {
+        g_source_remove(b->recovery_timeout);
+        b->recovery_timeout = 0;
+    }
+    b->engine_state = ENGINE_READY;
+    b->hard_reset_used = FALSE;
+    b->web_process_generation++;
+    g_clear_pointer(&b->load_error, g_free);
+    g_message("WebKit recovery ready: generation=%" G_GUINT64_FORMAT
+        " reset_count=%" G_GUINT64_FORMAT, b->web_process_generation, b->reset_count);
+    update_ui(b);
+}
+
 static void load_changed(WebKitWebView *view, WebKitLoadEvent event, gpointer data)
 {
-    (void)view;
     Browser *b = data;
     if (event == WEBKIT_LOAD_STARTED) g_clear_pointer(&b->load_error, g_free);
+    if (event == WEBKIT_LOAD_COMMITTED && b->engine_state == ENGINE_READY) {
+        const char *uri = webkit_web_view_get_uri(view);
+        if (uri && *uri) {
+            g_free(b->last_committed_uri);
+            b->last_committed_uri = g_strdup(uri);
+        }
+    }
+    if (event == WEBKIT_LOAD_FINISHED && b->engine_state == ENGINE_RECOVERING)
+        complete_recovery(b);
     update_ui(b);
 }
 
@@ -262,19 +533,126 @@ static void download_started(WebKitWebContext *context, WebKitDownload *download
     g_signal_connect(download, "finished", G_CALLBACK(download_finished), b);
 }
 
+static void cancel_page_requests(Browser *b)
+{
+    GList *requests = g_list_copy(b->page_requests);
+    for (GList *item = requests; item; item = item->next) {
+        Request *request = item->data;
+        request->reset_cancelled = TRUE;
+        g_cancellable_cancel(request->operation_cancel);
+    }
+    g_list_free(requests);
+}
+
+static void set_recovery_failure(Browser *b, const char *message)
+{
+    if (b->recovery_timeout) {
+        g_source_remove(b->recovery_timeout);
+        b->recovery_timeout = 0;
+    }
+    b->engine_state = ENGINE_FAILED;
+    g_free(b->load_error);
+    b->load_error = g_strdup(message);
+    g_warning("WebKit recovery failed: %s", message);
+    update_ui(b);
+}
+
+static gboolean recovery_timeout(gpointer data)
+{
+    Browser *b = data;
+    b->recovery_timeout = 0;
+    if (b->engine_state == ENGINE_READY || b->engine_state == ENGINE_FAILED)
+        return G_SOURCE_REMOVE;
+    if (!b->hard_reset_used) {
+        g_warning("WebKit soft reset timed out; escalating to engine reset");
+        hard_engine_reset(b);
+    } else set_recovery_failure(b, "WebKit engine did not become ready after reset.");
+    return G_SOURCE_REMOVE;
+}
+
+static void arm_recovery_timeout(Browser *b)
+{
+    if (b->recovery_timeout) g_source_remove(b->recovery_timeout);
+    b->recovery_timeout = g_timeout_add_seconds(RECOVERY_TIMEOUT_SECONDS,
+        recovery_timeout, b);
+}
+
+static void record_reset(Browser *b, const char *reason)
+{
+    flash_reset_warning(b);
+    b->reset_count++;
+    g_free(b->last_reset_at);
+    b->last_reset_at = timestamp_now();
+    g_free(b->last_termination_reason);
+    b->last_termination_reason = g_strdup(reason);
+    g_message("WebKit recovery started: reason=%s reset_count=%" G_GUINT64_FORMAT,
+        reason, b->reset_count);
+}
+
+static gboolean start_reset(Browser *b, const char *source)
+{
+    if (b->engine_state == ENGINE_RESETTING || b->engine_state == ENGINE_RECOVERING)
+        return FALSE;
+    cancel_page_requests(b);
+    b->recovery_burst_count = 0;
+    b->last_recovery_us = 0;
+    record_reset(b, source ? source : "requested");
+    b->hard_reset_used = FALSE;
+    if (b->engine_state == ENGINE_FAILED || !b->view) {
+        b->engine_state = ENGINE_RECOVERING;
+        hard_engine_reset(b);
+    } else {
+        b->engine_state = ENGINE_RESETTING;
+        arm_recovery_timeout(b);
+        update_ui(b);
+        webkit_web_view_terminate_web_process(b->view);
+    }
+    return TRUE;
+}
+
 static void process_terminated(WebKitWebView *view, WebKitWebProcessTerminationReason reason,
                                gpointer data)
 {
-    (void)view; (void)reason;
     Browser *b = data;
-    if (b->resetting) {
-        b->resetting = FALSE;
+    if (view != b->view) return;
+    const char *reason_name = termination_reason_name(reason);
+    g_free(b->last_termination_reason);
+    b->last_termination_reason = g_strdup(reason_name);
+    g_warning("WebKit web process terminated: reason=%s state=%s", reason_name,
+        engine_state_name(b->engine_state));
+
+    if (b->engine_state == ENGINE_RESETTING) {
+        b->engine_state = ENGINE_RECOVERING;
         g_clear_pointer(&b->load_error, g_free);
         webkit_web_view_load_uri(b->view, "about:blank");
+        update_ui(b);
         return;
     }
-    g_free(b->load_error);
-    b->load_error = g_strdup("Web process stopped. Reload to recover.");
+
+    if (b->engine_state == ENGINE_RECOVERING) {
+        if (!b->hard_reset_used) hard_engine_reset(b);
+        else set_recovery_failure(b, "WebKit terminated again during engine recovery.");
+        return;
+    }
+    if (b->engine_state == ENGINE_FAILED) return;
+
+    gint64 now = g_get_monotonic_time();
+    if (b->last_recovery_us &&
+        now - b->last_recovery_us <= RECOVERY_BURST_SECONDS * G_USEC_PER_SEC)
+        b->recovery_burst_count++;
+    else b->recovery_burst_count = 1;
+    b->last_recovery_us = now;
+    cancel_page_requests(b);
+    record_reset(b, reason_name);
+    if (b->recovery_burst_count > RECOVERY_BURST_LIMIT) {
+        set_recovery_failure(b, "WebKit stopped repeatedly; automatic recovery was bounded.");
+        return;
+    }
+    b->engine_state = ENGINE_RECOVERING;
+    b->hard_reset_used = FALSE;
+    arm_recovery_timeout(b);
+    g_clear_pointer(&b->load_error, g_free);
+    webkit_web_view_load_uri(b->view, "about:blank");
     update_ui(b);
 }
 
@@ -294,6 +672,7 @@ static char *normalize_uri(const char *input)
 
 static gboolean navigate(Browser *b, const char *input)
 {
+    if (b->engine_state != ENGINE_READY || !b->view) return FALSE;
     g_autofree char *uri = normalize_uri(input);
     if (!uri) return FALSE;
     g_clear_pointer(&b->load_error, g_free);
@@ -304,6 +683,7 @@ static gboolean navigate(Browser *b, const char *input)
 typedef struct {
     Browser *browser;
     char *uri;
+    guint64 generation;
 } PendingNavigation;
 
 static gboolean youtube_uri(const char *uri)
@@ -321,7 +701,8 @@ static gboolean youtube_uri(const char *uri)
 static gboolean navigate_pending(gpointer data)
 {
     PendingNavigation *pending = data;
-    navigate(pending->browser, pending->uri);
+    if (pending->browser->web_process_generation == pending->generation)
+        navigate(pending->browser, pending->uri);
     return G_SOURCE_REMOVE;
 }
 
@@ -344,6 +725,7 @@ static void youtube_navigation_message(WebKitUserContentManager *manager,
     PendingNavigation *pending = g_new0(PendingNavigation, 1);
     pending->browser = b;
     pending->uri = g_steal_pointer(&uri);
+    pending->generation = b->web_process_generation;
     g_idle_add_full(G_PRIORITY_DEFAULT_IDLE, navigate_pending, pending,
         pending_navigation_free);
 }
@@ -351,9 +733,18 @@ static void youtube_navigation_message(WebKitUserContentManager *manager,
 static void javascript_done(GObject *object, GAsyncResult *result, gpointer data)
 {
     Request *r = data;
+    if (r->page_bound) {
+        r->browser->page_requests = g_list_remove(r->browser->page_requests, r);
+        r->page_bound = FALSE;
+    }
     g_autoptr(GError) error = NULL;
     g_autoptr(JSCValue) value = webkit_web_view_call_async_javascript_function_finish(
         WEBKIT_WEB_VIEW(object), result, &error);
+    if (r->reset_cancelled) {
+        reply_full(r, NULL, "WebKit was reset while the page operation was running",
+            "webkit_reset", TRUE);
+        return;
+    }
     if (!value) {
         reply(r, NULL, error ? error->message : "JavaScript failed");
         return;
@@ -390,19 +781,53 @@ static void dispatch(Request *r)
     if (!cmd) { reply(r, NULL, "command must be a string"); return; }
     if (g_str_equal(cmd, "status")) {
         g_autoptr(JsonObject) state = json_object_new();
-        const char *uri = webkit_web_view_get_uri(b->view);
-        const char *title = webkit_web_view_get_title(b->view);
+        const char *uri = b->view ? webkit_web_view_get_uri(b->view) : NULL;
+        const char *title = b->view ? webkit_web_view_get_title(b->view) : NULL;
         json_object_set_string_member(state, "uri", uri ? uri : "");
         json_object_set_string_member(state, "title", title ? title : "");
-        json_object_set_boolean_member(state, "loading", webkit_web_view_is_loading(b->view));
-        json_object_set_boolean_member(state, "can_go_back", webkit_web_view_can_go_back(b->view));
-        json_object_set_boolean_member(state, "can_go_forward", webkit_web_view_can_go_forward(b->view));
+        json_object_set_boolean_member(state, "loading",
+            b->view && webkit_web_view_is_loading(b->view));
+        json_object_set_boolean_member(state, "can_go_back",
+            b->view && webkit_web_view_can_go_back(b->view));
+        json_object_set_boolean_member(state, "can_go_forward",
+            b->view && webkit_web_view_can_go_forward(b->view));
         json_object_set_boolean_member(state, "private", b->private_mode);
         json_object_set_boolean_member(state, "low_memory", b->low_memory);
         json_object_set_int_member(state, "memory_limit_mib", b->memory_limit);
+        json_object_set_int_member(state, "memory_kill_threshold_mib",
+            b->memory_kill_threshold);
         json_object_set_string_member(state, "download_dir", b->download_dir);
         json_object_set_int_member(state, "downloads_active", b->downloads_active);
         json_object_set_int_member(state, "pid", getpid());
+        json_object_set_string_member(state, "version", LIGHTVIEW_VERSION);
+        json_object_set_string_member(state, "running_mode", running_mode_name(b));
+        json_object_set_string_member(state, "running_mode_short", running_mode_short_name(b));
+        json_object_set_double_member(state, "ram_pss_mib",
+            (double)b->memory_pss_kib / 1024.0);
+        json_object_set_double_member(state, "cpu_percent", b->cpu_percent);
+        json_object_set_int_member(state, "resource_processes", b->resource_processes);
+        json_object_set_string_member(state, "window_title",
+            gtk_window_get_title(GTK_WINDOW(b->window)));
+        json_object_set_string_member(state, "toolbar_telemetry",
+            gtk_label_get_text(GTK_LABEL(b->telemetry)));
+        json_object_set_boolean_member(state, "version_dialog_visible",
+            b->version_dialog && gtk_widget_get_visible(b->version_dialog));
+        json_object_set_boolean_member(state, "mode_toggle_visible",
+            b->mode_toggle && gtk_widget_get_visible(b->mode_toggle));
+        json_object_set_boolean_member(state, "mode_toggle_active",
+            b->mode_toggle && gtk_toggle_button_get_active(
+                GTK_TOGGLE_BUTTON(b->mode_toggle)));
+        json_object_set_boolean_member(state, "reset_flash_active", b->flash_timeout != 0);
+        json_object_set_string_member(state, "engine_state", engine_state_name(b->engine_state));
+        json_object_set_int_member(state, "web_process_generation", b->web_process_generation);
+        json_object_set_int_member(state, "reset_count", b->reset_count);
+        json_object_set_string_member(state, "last_committed_uri",
+            b->last_committed_uri ? b->last_committed_uri : "");
+        if (b->last_termination_reason)
+            json_object_set_string_member(state, "last_termination_reason", b->last_termination_reason);
+        else json_object_set_null_member(state, "last_termination_reason");
+        if (b->last_reset_at) json_object_set_string_member(state, "last_reset_at", b->last_reset_at);
+        else json_object_set_null_member(state, "last_reset_at");
         if (b->load_error) json_object_set_string_member(state, "load_error", b->load_error);
         else json_object_set_null_member(state, "load_error");
         g_autoptr(JsonNode) node = json_node_new(JSON_NODE_OBJECT);
@@ -410,12 +835,104 @@ static void dispatch(Request *r)
         reply(r, node, NULL);
         return;
     }
+    if (g_str_equal(cmd, "version")) {
+        JsonNode *show_node = json_object_get_member(o, "show");
+        if (show_node && (!JSON_NODE_HOLDS_VALUE(show_node) ||
+            json_node_get_value_type(show_node) != G_TYPE_BOOLEAN)) {
+            reply(r, NULL, "show must be a boolean");
+            return;
+        }
+        if (show_node && json_node_get_boolean(show_node))
+            gtk_button_clicked(GTK_BUTTON(b->version_button));
+        g_autoptr(JsonObject) details = json_object_new();
+        json_object_set_string_member(details, "lightview", LIGHTVIEW_VERSION);
+        g_autofree char *webkit = g_strdup_printf("%u.%u.%u", webkit_get_major_version(),
+            webkit_get_minor_version(), webkit_get_micro_version());
+        json_object_set_string_member(details, "webkitgtk", webkit);
+        g_autoptr(JsonNode) node = json_node_new(JSON_NODE_OBJECT);
+        json_node_set_object(node, details);
+        reply(r, node, NULL);
+        return;
+    }
+    if (g_str_equal(cmd, "quit")) {
+        r->quit = TRUE;
+        reply(r, NULL, NULL);
+        return;
+    }
+    if (g_str_equal(cmd, "reset")) {
+        JsonNode *hard_node = json_object_get_member(o, "hard");
+        if (hard_node && (!JSON_NODE_HOLDS_VALUE(hard_node) ||
+            json_node_get_value_type(hard_node) != G_TYPE_BOOLEAN)) {
+            reply(r, NULL, "hard must be a boolean");
+            return;
+        }
+        gboolean hard = hard_node && json_node_get_boolean(hard_node);
+        if (b->engine_state == ENGINE_RESETTING || b->engine_state == ENGINE_RECOVERING) {
+            reply_full(r, NULL, "WebKit recovery is already in progress",
+                "webkit_recovering", TRUE);
+            return;
+        }
+        if (hard) {
+            cancel_page_requests(b);
+            b->recovery_burst_count = 0;
+            b->last_recovery_us = 0;
+            record_reset(b, "automation-hard-reset");
+            b->engine_state = ENGINE_RECOVERING;
+            hard_engine_reset(b);
+        } else if (!start_reset(b, "automation-request")) {
+            reply_full(r, NULL, "WebKit recovery is already in progress",
+                "webkit_recovering", TRUE);
+            return;
+        }
+        g_autoptr(JsonObject) operation = json_object_new();
+        json_object_set_int_member(operation, "operation_id", b->reset_count);
+        json_object_set_int_member(operation, "target_generation", b->web_process_generation + 1);
+        g_autoptr(JsonNode) node = json_node_new(JSON_NODE_OBJECT);
+        json_node_set_object(node, operation);
+        reply(r, node, NULL);
+        return;
+    }
+    if (g_str_equal(cmd, "mode")) {
+        JsonNode *mode_node = json_object_get_member(o, "low_memory");
+        if (!mode_node || !JSON_NODE_HOLDS_VALUE(mode_node) ||
+            json_node_get_value_type(mode_node) != G_TYPE_BOOLEAN) {
+            reply(r, NULL, "low_memory must be a boolean");
+            return;
+        }
+        if (b->engine_state == ENGINE_RESETTING || b->engine_state == ENGINE_RECOVERING) {
+            reply_full(r, NULL, "WebKit recovery is already in progress",
+                "webkit_recovering", TRUE);
+            return;
+        }
+        gboolean enabled = json_node_get_boolean(mode_node);
+        guint64 previous_generation = b->web_process_generation;
+        if (b->mode_toggle)
+            gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(b->mode_toggle), enabled);
+        else switch_low_memory_mode(b, enabled);
+        g_autoptr(JsonObject) operation = json_object_new();
+        json_object_set_string_member(operation, "running_mode", running_mode_name(b));
+        json_object_set_boolean_member(operation, "changed",
+            b->web_process_generation == previous_generation && b->engine_state != ENGINE_READY);
+        json_object_set_int_member(operation, "operation_id", b->reset_count);
+        json_object_set_int_member(operation, "target_generation",
+            b->engine_state == ENGINE_READY ? b->web_process_generation : previous_generation + 1);
+        g_autoptr(JsonNode) node = json_node_new(JSON_NODE_OBJECT);
+        json_node_set_object(node, operation);
+        reply(r, node, NULL);
+        return;
+    }
+    if (b->engine_state != ENGINE_READY || !b->view) {
+        reply_engine_unavailable(r);
+        return;
+    }
     if (g_str_equal(cmd, "eval")) {
         const char *script = string_member(o, "script");
         if (!script) { reply(r, NULL, "script must be a JavaScript expression string"); return; }
         g_autofree char *body = g_strdup_printf("return await (\n%s\n);", script);
+        r->page_bound = TRUE;
+        b->page_requests = g_list_prepend(b->page_requests, r);
         webkit_web_view_call_async_javascript_function(b->view, body, -1, NULL,
-            NULL, NULL, r->cancel, javascript_done, r);
+            NULL, NULL, r->operation_cancel, javascript_done, r);
         return;
     }
     if (g_str_equal(cmd, "open")) {
@@ -428,12 +945,6 @@ static void dispatch(Request *r)
     else if (g_str_equal(cmd, "forward")) webkit_web_view_go_forward(b->view);
     else if (g_str_equal(cmd, "reload")) webkit_web_view_reload(b->view);
     else if (g_str_equal(cmd, "stop")) webkit_web_view_stop_loading(b->view);
-    else if (g_str_equal(cmd, "reset")) {
-        if (b->resetting) { reply(r, NULL, "Web process reset already in progress"); return; }
-        b->resetting = TRUE;
-        webkit_web_view_terminate_web_process(b->view);
-    }
-    else if (g_str_equal(cmd, "quit")) r->quit = TRUE;
     else { reply(r, NULL, "Unknown command"); return; }
     reply(r, NULL, NULL);
 }
@@ -473,6 +984,7 @@ static gboolean incoming(GSocketService *service, GSocketConnection *connection,
     r->browser = b;
     r->connection = g_object_ref(connection);
     r->cancel = g_cancellable_new();
+    r->operation_cancel = g_cancellable_new();
     r->input = g_string_new(NULL);
     r->timeout = g_timeout_add_seconds(30, request_timeout, r);
     b->clients++;
@@ -556,15 +1068,25 @@ static gboolean start_control(Browser *b)
 static void address_activate(GtkEntry *entry, gpointer data)
 {
     Browser *b = data;
-    if (navigate(b, gtk_entry_get_text(entry))) gtk_widget_grab_focus(GTK_WIDGET(b->view));
+    if (b->engine_state == ENGINE_READY && b->view &&
+        navigate(b, gtk_entry_get_text(entry))) gtk_widget_grab_focus(GTK_WIDGET(b->view));
 }
 
 static void go_back(GtkButton *button, gpointer data)
-{ (void)button; webkit_web_view_go_back(((Browser *)data)->view); }
+{
+    (void)button; Browser *b = data;
+    if (b->engine_state == ENGINE_READY && b->view) webkit_web_view_go_back(b->view);
+}
 static void go_forward(GtkButton *button, gpointer data)
-{ (void)button; webkit_web_view_go_forward(((Browser *)data)->view); }
+{
+    (void)button; Browser *b = data;
+    if (b->engine_state == ENGINE_READY && b->view) webkit_web_view_go_forward(b->view);
+}
 static void reload(GtkButton *button, gpointer data)
-{ (void)button; webkit_web_view_reload(((Browser *)data)->view); }
+{
+    (void)button; Browser *b = data;
+    if (b->engine_state == ENGINE_READY && b->view) webkit_web_view_reload(b->view);
+}
 
 static gboolean key_pressed(GtkWidget *widget, GdkEventKey *event, gpointer data)
 {
@@ -574,13 +1096,16 @@ static gboolean key_pressed(GtkWidget *widget, GdkEventKey *event, gpointer data
     if ((event->state & GDK_CONTROL_MASK) && key == GDK_KEY_l) {
         gtk_widget_grab_focus(b->entry);
         gtk_editable_select_region(GTK_EDITABLE(b->entry), 0, -1);
-    } else if (key == GDK_KEY_F5 || ((event->state & GDK_CONTROL_MASK) && key == GDK_KEY_r))
+    } else if (b->engine_state == ENGINE_READY && b->view &&
+        (key == GDK_KEY_F5 || ((event->state & GDK_CONTROL_MASK) && key == GDK_KEY_r)))
         webkit_web_view_reload(b->view);
-    else if ((event->state & GDK_MOD1_MASK) && key == GDK_KEY_Left)
+    else if (b->engine_state == ENGINE_READY && b->view &&
+        (event->state & GDK_MOD1_MASK) && key == GDK_KEY_Left)
         webkit_web_view_go_back(b->view);
-    else if ((event->state & GDK_MOD1_MASK) && key == GDK_KEY_Right)
+    else if (b->engine_state == ENGINE_READY && b->view &&
+        (event->state & GDK_MOD1_MASK) && key == GDK_KEY_Right)
         webkit_web_view_go_forward(b->view);
-    else if (key == GDK_KEY_Escape) webkit_web_view_stop_loading(b->view);
+    else if (b->view && key == GDK_KEY_Escape) webkit_web_view_stop_loading(b->view);
     else if ((event->state & GDK_CONTROL_MASK) && key == GDK_KEY_q) gtk_main_quit();
     else return FALSE;
     return TRUE;
@@ -599,6 +1124,170 @@ static gboolean decide_policy(WebKitWebView *view, WebKitPolicyDecision *decisio
     return TRUE;
 }
 
+static WebKitWebContext *create_web_context(Browser *b)
+{
+    WebKitWebContext *context = g_object_new(WEBKIT_TYPE_WEB_CONTEXT,
+        "website-data-manager", b->manager,
+        "memory-pressure-settings", b->pressure,
+        NULL);
+    webkit_web_context_set_sandbox_enabled(context, b->sandbox_enabled);
+    webkit_web_context_set_cache_model(context, b->browser_cache ?
+        WEBKIT_CACHE_MODEL_WEB_BROWSER : WEBKIT_CACHE_MODEL_DOCUMENT_VIEWER);
+    webkit_web_context_set_spell_checking_enabled(context, FALSE);
+    g_signal_connect(context, "download-started", G_CALLBACK(download_started), b);
+    return context;
+}
+
+static WebKitWebView *create_web_view(Browser *b)
+{
+    g_autoptr(WebKitUserContentManager) content = webkit_user_content_manager_new();
+    g_signal_connect(content, "script-message-received::navigation",
+        G_CALLBACK(youtube_navigation_message), b);
+    webkit_user_content_manager_register_script_message_handler(content, "navigation");
+    const char *youtube_navigation_workaround =
+        "document.addEventListener('click',event=>{"
+        "if(!event.isTrusted||event.defaultPrevented||event.button!==0||event.ctrlKey||"
+        "event.metaKey||event.shiftKey||event.altKey||!/(^|\\.)youtube\\.com$/.test(location.hostname))return;"
+        "const anchor=event.target.closest?.('a[href]');"
+        "if(!anchor||anchor.hasAttribute('download')||(anchor.target&&anchor.target!=='_self'))return;"
+        "const url=new URL(anchor.href,location.href);"
+        "if(url.protocol!=='http:'&&url.protocol!=='https:')return;"
+        "event.preventDefault();event.stopImmediatePropagation();"
+        "window.webkit.messageHandlers.navigation.postMessage(url.href);"
+        "},true);";
+    WebKitUserScript *navigation_script = webkit_user_script_new(youtube_navigation_workaround,
+        WEBKIT_USER_CONTENT_INJECT_TOP_FRAME, WEBKIT_USER_SCRIPT_INJECT_AT_DOCUMENT_START,
+        NULL, NULL);
+    webkit_user_content_manager_add_script(content, navigation_script);
+    webkit_user_script_unref(navigation_script);
+    WebKitWebView *view = WEBKIT_WEB_VIEW(g_object_new(WEBKIT_TYPE_WEB_VIEW,
+        "web-context", b->context, "settings", b->settings,
+        "user-content-manager", content, NULL));
+    g_signal_connect(view, "notify::title", G_CALLBACK(notify_view), b);
+    g_signal_connect(view, "notify::uri", G_CALLBACK(notify_view), b);
+    g_signal_connect(view, "load-changed", G_CALLBACK(load_changed), b);
+    g_signal_connect(view, "load-failed", G_CALLBACK(load_failed), b);
+    g_signal_connect(view, "web-process-terminated", G_CALLBACK(process_terminated), b);
+    g_signal_connect(view, "decide-policy", G_CALLBACK(decide_policy), b);
+    gtk_box_pack_start(GTK_BOX(b->view_box), GTK_WIDGET(view), TRUE, TRUE, 0);
+    gtk_widget_show(GTK_WIDGET(view));
+    return view;
+}
+
+static void configure_memory_policy(Browser *b)
+{
+    b->memory_kill_threshold = MAX((guint)MINIMUM_KILL_THRESHOLD_MIB,
+        b->memory_limit * 4);
+    webkit_memory_pressure_settings_set_memory_limit(b->pressure, b->memory_limit);
+    webkit_memory_pressure_settings_set_conservative_threshold(b->pressure, 0.25);
+    webkit_memory_pressure_settings_set_strict_threshold(b->pressure, 0.50);
+    webkit_memory_pressure_settings_set_kill_threshold(b->pressure,
+        (double)b->memory_kill_threshold / b->memory_limit);
+    webkit_memory_pressure_settings_set_poll_interval(b->pressure, 15.0);
+    webkit_website_data_manager_set_memory_pressure_settings(b->pressure);
+}
+
+static void hard_engine_reset(Browser *b)
+{
+    b->engine_state = ENGINE_RECOVERING;
+    b->hard_reset_used = TRUE;
+    cancel_page_requests(b);
+    if (b->view) {
+        WebKitWebView *old_view = b->view;
+        b->view = NULL;
+        g_signal_handlers_disconnect_by_data(old_view, b);
+        gtk_widget_destroy(GTK_WIDGET(old_view));
+    }
+    g_clear_object(&b->context);
+    b->context = create_web_context(b);
+    b->view = create_web_view(b);
+    if (!b->context || !b->view) {
+        set_recovery_failure(b, "Unable to recreate the WebKit engine.");
+        return;
+    }
+    arm_recovery_timeout(b);
+    webkit_web_view_load_uri(b->view, "about:blank");
+    update_ui(b);
+}
+
+static gboolean switch_low_memory_mode(Browser *b, gboolean enabled)
+{
+    if (b->low_memory == enabled) return FALSE;
+    if (b->engine_state == ENGINE_RESETTING || b->engine_state == ENGINE_RECOVERING)
+        return FALSE;
+    b->low_memory = enabled;
+    if (!b->memory_limit_explicit) b->memory_limit = enabled ? 384 : 768;
+    configure_memory_policy(b);
+    g_object_set(b->settings,
+        "enable-webrtc", !enabled,
+        "enable-webgl", !enabled,
+        "enable-accelerated-2d-canvas", !enabled,
+        NULL);
+    b->recovery_burst_count = 0;
+    b->last_recovery_us = 0;
+    record_reset(b, enabled ? "mode-change-low-memory" : "mode-change-normal");
+    b->engine_state = ENGINE_RECOVERING;
+    hard_engine_reset(b);
+    return TRUE;
+}
+
+static void low_memory_toggled(GtkToggleButton *toggle, gpointer data)
+{
+    Browser *b = data;
+    if (b->mode_toggle_syncing) return;
+    gboolean enabled = gtk_toggle_button_get_active(toggle);
+    if (b->low_memory == enabled) return;
+    if (!switch_low_memory_mode(b, enabled)) {
+        b->mode_toggle_syncing = TRUE;
+        gtk_toggle_button_set_active(toggle, b->low_memory);
+        b->mode_toggle_syncing = FALSE;
+    }
+}
+
+static void reset_clicked(GtkButton *button, gpointer data)
+{
+    (void)button;
+    Browser *b = data;
+    if (!start_reset(b, "toolbar-request"))
+        gtk_window_present(GTK_WINDOW(b->window));
+}
+
+static void close_dialog(GtkDialog *dialog, gint response, gpointer data)
+{
+    (void)response; (void)data;
+    gtk_widget_destroy(GTK_WIDGET(dialog));
+}
+
+static void version_clicked(GtkButton *button, gpointer data)
+{
+    (void)button;
+    Browser *b = data;
+    if (b->version_dialog) {
+        gtk_window_present(GTK_WINDOW(b->version_dialog));
+        return;
+    }
+    g_autofree char *details = version_text();
+    b->version_dialog = gtk_message_dialog_new(GTK_WINDOW(b->window),
+        GTK_DIALOG_DESTROY_WITH_PARENT, GTK_MESSAGE_INFO, GTK_BUTTONS_CLOSE,
+        "Lightview version information");
+    gtk_message_dialog_format_secondary_text(GTK_MESSAGE_DIALOG(b->version_dialog),
+        "%s", details);
+    gtk_window_set_title(GTK_WINDOW(b->version_dialog), "About Lightview");
+    b->mode_toggle = gtk_check_button_new_with_label("Low memory mode (LM)");
+    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(b->mode_toggle), b->low_memory);
+    gtk_widget_set_tooltip_text(b->mode_toggle,
+        "Switching mode resets WebKit to about:blank while keeping the window and control socket");
+    gtk_box_pack_start(GTK_BOX(gtk_message_dialog_get_message_area(
+        GTK_MESSAGE_DIALOG(b->version_dialog))), b->mode_toggle, FALSE, FALSE, 6);
+    g_signal_connect(b->mode_toggle, "toggled", G_CALLBACK(low_memory_toggled), b);
+    g_signal_connect(b->mode_toggle, "destroy", G_CALLBACK(gtk_widget_destroyed),
+        &b->mode_toggle);
+    g_signal_connect(b->version_dialog, "response", G_CALLBACK(close_dialog), NULL);
+    g_signal_connect(b->version_dialog, "destroy", G_CALLBACK(gtk_widget_destroyed),
+        &b->version_dialog);
+    gtk_widget_show_all(b->version_dialog);
+}
+
 int main(int argc, char **argv)
 {
     /* WebKitGTK 2.52 leaves its accelerated backing store without a transport
@@ -610,7 +1299,9 @@ int main(int argc, char **argv)
     if (!g_getenv("WEBKIT_DMABUF_RENDERER_FORCE_SHM"))
         g_setenv("WEBKIT_DMABUF_RENDERER_FORCE_SHM", "1", FALSE);
     Browser b = {0};
-    gboolean no_control = FALSE, no_images = FALSE, browser_cache = FALSE, version = FALSE;
+    b.engine_state = ENGINE_READY;
+    b.web_process_generation = 1;
+    gboolean no_control = FALSE, version = FALSE;
     gint memory_limit = 0;
     g_autofree char *profile = NULL;
     g_auto(GStrv) urls = NULL;
@@ -619,10 +1310,10 @@ int main(int argc, char **argv)
         {"profile", 0, 0, G_OPTION_ARG_FILENAME, &profile, "Persistent profile directory", "DIR"},
         {"socket", 0, 0, G_OPTION_ARG_FILENAME, &b.socket_path, "Control socket in a private directory", "PATH"},
         {"no-control", 0, 0, G_OPTION_ARG_NONE, &no_control, "Disable the automation socket", NULL},
-        {"no-images", 0, 0, G_OPTION_ARG_NONE, &no_images, "Skip automatic image loading", NULL},
+        {"no-images", 0, 0, G_OPTION_ARG_NONE, &b.no_images, "Skip automatic image loading", NULL},
         {"memory-limit", 0, 0, G_OPTION_ARG_INT, &memory_limit, "WebKit per-process memory-pressure limit in MiB", "MIB"},
         {"low-memory", 0, 0, G_OPTION_ARG_NONE, &b.low_memory, "Reduce optional web features and use a 384 MiB limit", NULL},
-        {"browser-cache", 0, 0, G_OPTION_ARG_NONE, &browser_cache, "Favor repeat-load speed over memory savings", NULL},
+        {"browser-cache", 0, 0, G_OPTION_ARG_NONE, &b.browser_cache, "Favor repeat-load speed over memory savings", NULL},
         {"version", 0, 0, G_OPTION_ARG_NONE, &version, "Show version", NULL},
         {G_OPTION_REMAINING, 0, 0, G_OPTION_ARG_STRING_ARRAY, &urls, NULL, "[URL]"},
         {NULL, 0, 0, 0, NULL, NULL, NULL}
@@ -634,13 +1325,14 @@ int main(int argc, char **argv)
         g_printerr("%s\n", error->message); return 1;
     }
     if (version) {
-        g_print("Lightview 0.1.7 (WebKitGTK %u.%u.%u)\n", webkit_get_major_version(),
-            webkit_get_minor_version(), webkit_get_micro_version());
+        g_autofree char *details = version_text();
+        g_print("%s\n", details);
         return 0;
     }
     if ((urls && g_strv_length(urls) > 1) || (profile && b.private_mode)) {
         g_printerr("Use one URL; --profile and --private are mutually exclusive.\n"); return 1;
     }
+    b.memory_limit_explicit = memory_limit != 0;
     if (memory_limit == 0) memory_limit = b.low_memory ? 384 : 768;
     if (memory_limit < 128 || memory_limit > 65536) {
         g_printerr("--memory-limit must be between 128 and 65536 MiB.\n"); return 1;
@@ -660,15 +1352,10 @@ int main(int argc, char **argv)
         g_printerr("A graphical display is required (XFCE/X11 or Wayland).\n"); return 1;
     }
     set_application_icon();
-    g_autoptr(WebKitMemoryPressureSettings) pressure = webkit_memory_pressure_settings_new();
-    webkit_memory_pressure_settings_set_memory_limit(pressure, b.memory_limit);
-    webkit_memory_pressure_settings_set_conservative_threshold(pressure, 0.25);
-    webkit_memory_pressure_settings_set_strict_threshold(pressure, 0.50);
-    webkit_memory_pressure_settings_set_poll_interval(pressure, 15.0);
-    webkit_website_data_manager_set_memory_pressure_settings(pressure);
+    b.pressure = webkit_memory_pressure_settings_new();
+    configure_memory_policy(&b);
     int profile_fd = -1;
-    g_autoptr(WebKitWebsiteDataManager) manager = NULL;
-    if (b.private_mode) manager = webkit_website_data_manager_new_ephemeral();
+    if (b.private_mode) b.manager = webkit_website_data_manager_new_ephemeral();
     else {
         if (!profile) profile = g_build_filename(g_get_user_data_dir(), "lightview", NULL);
         g_autofree char *absolute = g_canonicalize_filename(profile, NULL);
@@ -681,28 +1368,20 @@ int main(int argc, char **argv)
             return 1;
         }
         g_autofree char *cache = g_build_filename(absolute, "cache", NULL);
-        manager = webkit_website_data_manager_new("base-data-directory", absolute,
+        b.manager = webkit_website_data_manager_new("base-data-directory", absolute,
             "base-cache-directory", cache, NULL);
         g_autofree char *cookies = g_build_filename(absolute, "cookies.sqlite", NULL);
         webkit_cookie_manager_set_persistent_storage(
-            webkit_website_data_manager_get_cookie_manager(manager), cookies,
+            webkit_website_data_manager_get_cookie_manager(b.manager), cookies,
             WEBKIT_COOKIE_PERSISTENT_STORAGE_SQLITE);
     }
-    g_autoptr(WebKitWebContext) context = g_object_new(WEBKIT_TYPE_WEB_CONTEXT,
-        "website-data-manager", manager,
-        "memory-pressure-settings", pressure,
-        NULL);
     const char *disable_sandbox = g_getenv("WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS");
-    webkit_web_context_set_sandbox_enabled(context,
-        !(disable_sandbox && g_str_equal(disable_sandbox, "1")));
-    webkit_web_context_set_cache_model(context, browser_cache ?
-        WEBKIT_CACHE_MODEL_WEB_BROWSER : WEBKIT_CACHE_MODEL_DOCUMENT_VIEWER);
-    webkit_web_context_set_spell_checking_enabled(context, FALSE);
-    g_signal_connect(context, "download-started", G_CALLBACK(download_started), &b);
-    g_autoptr(WebKitSettings) settings = webkit_settings_new_with_settings(
+    b.sandbox_enabled = !(disable_sandbox && g_str_equal(disable_sandbox, "1"));
+    b.context = create_web_context(&b);
+    b.settings = webkit_settings_new_with_settings(
         "enable-javascript", TRUE,
-        "enable-page-cache", browser_cache,
-        "auto-load-images", !no_images,
+        "enable-page-cache", b.browser_cache,
+        "auto-load-images", !b.no_images,
         "media-playback-requires-user-gesture", TRUE,
         "enable-webrtc", !b.low_memory,
         "enable-webgl", !b.low_memory,
@@ -716,57 +1395,54 @@ int main(int argc, char **argv)
     b.back = gtk_button_new_from_icon_name("go-previous-symbolic", GTK_ICON_SIZE_BUTTON);
     b.forward = gtk_button_new_from_icon_name("go-next-symbolic", GTK_ICON_SIZE_BUTTON);
     GtkWidget *refresh = gtk_button_new_from_icon_name("view-refresh-symbolic", GTK_ICON_SIZE_BUTTON);
+    b.reset_button = gtk_button_new_from_icon_name("edit-clear-all-symbolic", GTK_ICON_SIZE_BUTTON);
+    b.version_button = gtk_button_new_from_icon_name("dialog-information-symbolic", GTK_ICON_SIZE_BUTTON);
     gtk_widget_set_tooltip_text(b.back, "Back (Alt+Left)");
     gtk_widget_set_tooltip_text(b.forward, "Forward (Alt+Right)");
     gtk_widget_set_tooltip_text(refresh, "Reload (Ctrl+R)");
+    gtk_widget_set_tooltip_text(b.reset_button, "Reset WebKit");
+    gtk_widget_set_tooltip_text(b.version_button, "Version information");
+    atk_object_set_name(gtk_widget_get_accessible(b.reset_button), "Reset WebKit");
+    atk_object_set_name(gtk_widget_get_accessible(b.version_button), "Version information");
     b.entry = gtk_entry_new();
     gtk_entry_set_placeholder_text(GTK_ENTRY(b.entry), "Address (Ctrl+L)");
+    g_autoptr(GtkCssProvider) reset_css = gtk_css_provider_new();
+    gtk_css_provider_load_from_data(reset_css,
+        ".webkit-reset-flash { background-image: none; background-color: #c62828; "
+        "color: white; border-color: #8e0000; }", -1, NULL);
+    gtk_style_context_add_provider(gtk_widget_get_style_context(b.entry),
+        GTK_STYLE_PROVIDER(reset_css), GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
+    b.telemetry = gtk_label_new(NULL);
+    gtk_label_set_ellipsize(GTK_LABEL(b.telemetry), PANGO_ELLIPSIZE_END);
+    gtk_label_set_max_width_chars(GTK_LABEL(b.telemetry), 30);
+    gtk_widget_set_tooltip_text(b.telemetry,
+        "Running mode and Lightview/WebKit process-tree resource usage (PSS)");
+    atk_object_set_name(gtk_widget_get_accessible(b.telemetry),
+        "Running mode and resource usage");
     gtk_box_pack_start(GTK_BOX(toolbar), b.back, FALSE, FALSE, 0);
     gtk_box_pack_start(GTK_BOX(toolbar), b.forward, FALSE, FALSE, 0);
     gtk_box_pack_start(GTK_BOX(toolbar), refresh, FALSE, FALSE, 0);
     gtk_box_pack_start(GTK_BOX(toolbar), b.entry, TRUE, TRUE, 0);
-    g_autoptr(WebKitUserContentManager) content = webkit_user_content_manager_new();
-    g_signal_connect(content, "script-message-received::navigation",
-        G_CALLBACK(youtube_navigation_message), &b);
-    webkit_user_content_manager_register_script_message_handler(content, "navigation");
-    const char *youtube_navigation_workaround =
-        "document.addEventListener('click',event=>{"
-        "if(!event.isTrusted||event.defaultPrevented||event.button!==0||event.ctrlKey||"
-        "event.metaKey||event.shiftKey||event.altKey||!/(^|\\.)youtube\\.com$/.test(location.hostname))return;"
-        "const anchor=event.target.closest?.('a[href]');"
-        "if(!anchor||anchor.hasAttribute('download')||(anchor.target&&anchor.target!=='_self'))return;"
-        "const url=new URL(anchor.href,location.href);"
-        "if(url.protocol!=='http:'&&url.protocol!=='https:')return;"
-        "event.preventDefault();event.stopImmediatePropagation();"
-        "window.webkit.messageHandlers.navigation.postMessage(url.href);"
-        "},true);";
-    WebKitUserScript *navigation_script = webkit_user_script_new(youtube_navigation_workaround,
-        WEBKIT_USER_CONTENT_INJECT_TOP_FRAME, WEBKIT_USER_SCRIPT_INJECT_AT_DOCUMENT_START,
-        NULL, NULL);
-    webkit_user_content_manager_add_script(content, navigation_script);
-    webkit_user_script_unref(navigation_script);
-    b.view = WEBKIT_WEB_VIEW(g_object_new(WEBKIT_TYPE_WEB_VIEW,
-        "web-context", context, "settings", settings,
-        "user-content-manager", content, NULL));
+    gtk_box_pack_start(GTK_BOX(toolbar), b.telemetry, FALSE, FALSE, 4);
+    gtk_box_pack_start(GTK_BOX(toolbar), b.reset_button, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(toolbar), b.version_button, FALSE, FALSE, 0);
+    b.view_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
     b.message = gtk_label_new(NULL);
     gtk_label_set_ellipsize(GTK_LABEL(b.message), PANGO_ELLIPSIZE_END);
     gtk_label_set_xalign(GTK_LABEL(b.message), 0);
     gtk_box_pack_start(GTK_BOX(column), toolbar, FALSE, FALSE, 0);
-    gtk_box_pack_start(GTK_BOX(column), GTK_WIDGET(b.view), TRUE, TRUE, 0);
+    gtk_box_pack_start(GTK_BOX(column), b.view_box, TRUE, TRUE, 0);
     gtk_box_pack_start(GTK_BOX(column), b.message, FALSE, FALSE, 2);
     gtk_container_add(GTK_CONTAINER(b.window), column);
+    b.view = create_web_view(&b);
     g_signal_connect(b.window, "destroy", G_CALLBACK(gtk_main_quit), NULL);
     g_signal_connect(b.window, "key-press-event", G_CALLBACK(key_pressed), &b);
     g_signal_connect(b.entry, "activate", G_CALLBACK(address_activate), &b);
     g_signal_connect(b.back, "clicked", G_CALLBACK(go_back), &b);
     g_signal_connect(b.forward, "clicked", G_CALLBACK(go_forward), &b);
     g_signal_connect(refresh, "clicked", G_CALLBACK(reload), &b);
-    g_signal_connect(b.view, "notify::title", G_CALLBACK(notify_view), &b);
-    g_signal_connect(b.view, "notify::uri", G_CALLBACK(notify_view), &b);
-    g_signal_connect(b.view, "load-changed", G_CALLBACK(load_changed), &b);
-    g_signal_connect(b.view, "load-failed", G_CALLBACK(load_failed), &b);
-    g_signal_connect(b.view, "web-process-terminated", G_CALLBACK(process_terminated), &b);
-    g_signal_connect(b.view, "decide-policy", G_CALLBACK(decide_policy), &b);
+    g_signal_connect(b.reset_button, "clicked", G_CALLBACK(reset_clicked), &b);
+    g_signal_connect(b.version_button, "clicked", G_CALLBACK(version_clicked), &b);
     if (!no_control) {
         if (!b.socket_path) b.socket_path = g_build_filename(g_get_user_runtime_dir(),
             "lightview", "control.sock", NULL);
@@ -781,19 +1457,30 @@ int main(int argc, char **argv)
         if (!no_control) g_unlink(b.socket_path);
         return 1;
     }
-    update_ui(&b);
+    sample_resource_usage(&b);
+    b.resource_timer = g_timeout_add_seconds(2, sample_resource_usage, &b);
     gtk_widget_grab_focus(urls ? GTK_WIDGET(b.view) : b.entry);
     gtk_main();
+    if (b.resource_timer) g_source_remove(b.resource_timer);
+    if (b.flash_timeout) g_source_remove(b.flash_timeout);
+    if (b.recovery_timeout) g_source_remove(b.recovery_timeout);
     if (b.service) {
         g_socket_service_stop(b.service);
         g_socket_listener_close(G_SOCKET_LISTENER(b.service));
         g_unlink(b.socket_path);
         g_object_unref(b.service);
     }
+    g_clear_object(&b.context);
+    g_clear_object(&b.settings);
+    g_clear_object(&b.manager);
+    webkit_memory_pressure_settings_free(b.pressure);
     if (profile_fd >= 0) close(profile_fd);
     g_free(b.socket_path);
     g_free(b.load_error);
     g_free(b.download_dir);
     g_free(b.download_message);
+    g_free(b.last_committed_uri);
+    g_free(b.last_termination_reason);
+    g_free(b.last_reset_at);
     return 0;
 }

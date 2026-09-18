@@ -130,6 +130,16 @@ class BrowserIntegration(unittest.TestCase):
                 self.assertFalse(state["low_memory"])
                 self.assertEqual(state["memory_limit_mib"], 768)
                 self.assertEqual(state["pid"], process.pid)
+                self.assertFalse(state["reset_flash_active"])
+                self.assertEqual(state["running_mode"], "Private")
+                self.assertGreater(state["ram_pss_mib"], 0)
+                self.assertGreaterEqual(state["cpu_percent"], 0)
+                self.assertGreaterEqual(state["resource_processes"], 1)
+                self.assertEqual(state["running_mode_short"], "P")
+                self.assertIn(" · MODE:P, ", state["window_title"])
+                self.assertIn("M, CPU ", state["window_title"])
+                self.assertTrue(state["toolbar_telemetry"].startswith("MODE:P, "))
+                self.assertIn("M, CPU ", state["toolbar_telemetry"])
                 self.assertEqual(self.cli(path, "eval", "({answer: 6 * 7, list: [true, null]})"),
                                  {"answer": 42, "list": [True, None]})
                 self.assertEqual(self.cli(path, "eval", "new Promise(r => setTimeout(() => r(42), 50))"), 42)
@@ -152,10 +162,24 @@ class BrowserIntegration(unittest.TestCase):
                 self.cli(path, "wait", "location.pathname === '/next' && document.readyState === 'complete'")
                 self.cli(path, "reload")
                 self.cli(path, "wait")
-                self.cli(path, "eval", "window.beforeReset = 42")
-                self.cli(path, "reset")
+                self.cli(path, "eval", "(() => { window.beforeReset = 42; localStorage.setItem('across-reset', 'yes'); return true; })()")
+                before_reset = self.cli(path, "status")
+                socket_inode = os.stat(path).st_ino
+                reset = self.cli(path, "reset")
+                self.assertEqual(reset["engine_state"], "ready")
+                self.assertGreater(reset["web_process_generation"],
+                                   before_reset["web_process_generation"])
                 self.cli(path, "wait", "location.href === 'about:blank' && document.readyState === 'complete'")
                 self.assertEqual(self.cli(path, "eval", "typeof window.beforeReset"), "undefined")
+                after_reset = self.cli(path, "status")
+                self.assertEqual(after_reset["pid"], process.pid)
+                self.assertEqual(os.stat(path).st_ino, socket_inode)
+                self.assertEqual(after_reset["engine_state"], "ready")
+                self.assertEqual(after_reset["last_termination_reason"], "terminated-by-api")
+                self.assertEqual(after_reset["last_committed_uri"], self.url + "/next")
+                self.assertTrue(after_reset["reset_flash_active"])
+                self.cli(path, "open", self.url, "--wait")
+                self.assertEqual(self.cli(path, "eval", "localStorage.getItem('across-reset')"), "yes")
                 memory = subprocess.check_output([str(ROOT / "tools/lightview-memory"), str(process.pid)], text=True)
                 report = json.loads(memory)
                 self.assertGreater(report["total_rss_mib"], 0)
@@ -196,6 +220,45 @@ class BrowserIntegration(unittest.TestCase):
                 process.wait(timeout=5)
                 self.assertFalse(Path(path).exists())
 
+    def test_reset_cancels_page_operation_with_retryable_error(self):
+        with tempfile.TemporaryDirectory(prefix="lightview-test-") as directory:
+            with browser(directory, "--private") as (path, process):
+                response = {}
+                sent = threading.Event()
+
+                def long_evaluation():
+                    payload = json.dumps({
+                        "command": "eval",
+                        "script": "new Promise(resolve => setTimeout(() => resolve(42), 10000))",
+                    }).encode() + b"\n"
+                    with socket.socket(socket.AF_UNIX) as connection:
+                        connection.settimeout(10)
+                        connection.connect(path)
+                        connection.sendall(payload)
+                        sent.set()
+                        response.update(json.loads(connection.makefile("rb").readline()))
+
+                worker = threading.Thread(target=long_evaluation)
+                worker.start()
+                self.assertTrue(sent.wait(timeout=2))
+                time.sleep(0.1)
+                operation = ctl.request(path, "reset", timeout=5)
+                worker.join(timeout=5)
+                self.assertFalse(worker.is_alive())
+                self.assertFalse(response["ok"])
+                self.assertEqual(response["error_code"], "webkit_reset")
+                self.assertTrue(response["retryable"])
+                deadline = time.monotonic() + 10
+                while True:
+                    state = ctl.request(path, "status", timeout=2)
+                    if (state["engine_state"] == "ready" and
+                            state["web_process_generation"] >= operation["target_generation"]):
+                        break
+                    self.assertLess(time.monotonic(), deadline)
+                    time.sleep(0.1)
+                self.assertEqual(state["pid"], process.pid)
+                self.assertEqual(ctl.request(path, "eval", timeout=2, script="6 * 7"), 42)
+
     def test_stale_socket_recovery_after_crash(self):
         with tempfile.TemporaryDirectory(prefix="lightview-test-") as directory:
             with browser(directory, "--private") as (path, process):
@@ -211,12 +274,26 @@ class BrowserIntegration(unittest.TestCase):
             profile = str(Path(directory) / "profile")
             with browser(directory, "--profile", profile) as (path, _):
                 self.cli(path, "open", self.url, "--wait")
+                self.assertEqual(self.cli(path, "status")["running_mode"], "Normal")
                 self.cli(path, "eval", "(() => {localStorage.setItem('saved', 'yes'); document.cookie = 'saved=yes; Max-Age=3600; Path=/'; return true;})()")
                 collision = subprocess.run([str(ROOT / "build/lightview"), "--profile", profile, "--no-control"],
                                            capture_output=True, text=True, timeout=10)
                 self.assertNotEqual(collision.returncode, 0)
                 self.assertIn("Cannot lock profile", collision.stderr)
             with browser(directory, "--profile", profile) as (path, _):
+                self.cli(path, "open", self.url, "--wait")
+                self.assertEqual(self.cli(path, "eval", "localStorage.getItem('saved')"), "yes")
+                self.assertIn("saved=yes", self.cli(path, "eval", "document.cookie"))
+                before = self.cli(path, "status")
+                reset = self.cli(path, "reset", "--hard")
+                self.assertGreater(reset["web_process_generation"],
+                                   before["web_process_generation"])
+                time.sleep(2.2)
+                recovered = self.cli(path, "status")
+                self.assertGreater(recovered["ram_pss_mib"], 0)
+                self.assertIn(" · MODE:N, ", recovered["window_title"])
+                self.assertTrue(recovered["toolbar_telemetry"].startswith("MODE:N, "))
+                self.assertTrue(recovered["reset_flash_active"])
                 self.cli(path, "open", self.url, "--wait")
                 self.assertEqual(self.cli(path, "eval", "localStorage.getItem('saved')"), "yes")
                 self.assertIn("saved=yes", self.cli(path, "eval", "document.cookie"))
@@ -252,6 +329,11 @@ class BrowserIntegration(unittest.TestCase):
                 state = self.cli(path, "status")
                 self.assertTrue(state["low_memory"])
                 self.assertEqual(state["memory_limit_mib"], 384)
+                self.assertEqual(state["memory_kill_threshold_mib"], 3072)
+                self.assertEqual(state["running_mode"], "Private / Low memory")
+                self.assertEqual(state["running_mode_short"], "P/LM")
+                self.assertIn(" · MODE:P/LM, ", state["window_title"])
+                self.assertTrue(state["toolbar_telemetry"].startswith("MODE:P/LM, "))
                 self.cli(path, "open", self.url, "--wait")
                 self.cli(path, "wait",
                     "document.querySelector('#image').complete && document.querySelector('#image').naturalWidth === 8")
@@ -261,6 +343,41 @@ class BrowserIntegration(unittest.TestCase):
                 media_apis = self.cli(path, "eval",
                     "({audioContext: typeof AudioContext, mediaSource: typeof MediaSource})")
                 self.assertEqual(media_apis, {"audioContext": "function", "mediaSource": "function"})
+
+    def test_version_sources_match(self):
+        command_line = subprocess.check_output(
+            [str(ROOT / "build/lightview"), "--version"], text=True).strip()
+        with tempfile.TemporaryDirectory(prefix="lightview-test-") as directory:
+            with browser(directory, "--private") as (path, process):
+                before = self.cli(path, "status")
+                socket_inode = os.stat(path).st_ino
+                details = self.cli(path, "version", "--show")
+                self.assertIn(f"Lightview {details['lightview']}", command_line)
+                self.assertIn(f"WebKitGTK {details['webkitgtk']}", command_line)
+                state = self.cli(path, "status")
+                self.assertEqual(state["version"], details["lightview"])
+                self.assertTrue(state["version_dialog_visible"])
+                self.assertTrue(state["mode_toggle_visible"])
+                self.assertFalse(state["mode_toggle_active"])
+                self.assertEqual(state["uri"], before["uri"])
+                self.assertEqual(state["engine_state"], "ready")
+                self.assertEqual(state["web_process_generation"], 1)
+                switched = self.cli(path, "mode", "low-memory")
+                self.assertTrue(switched["changed"])
+                state = self.cli(path, "status")
+                self.assertTrue(state["low_memory"])
+                self.assertTrue(state["mode_toggle_active"])
+                self.assertEqual(state["memory_limit_mib"], 384)
+                self.assertEqual(state["memory_kill_threshold_mib"], 3072)
+                self.assertEqual(state["pid"], process.pid)
+                self.assertEqual(os.stat(path).st_ino, socket_inode)
+                self.assertGreater(state["web_process_generation"], 1)
+                switched = self.cli(path, "mode", "normal")
+                self.assertTrue(switched["changed"])
+                state = self.cli(path, "status")
+                self.assertFalse(state["low_memory"])
+                self.assertFalse(state["mode_toggle_active"])
+                self.assertEqual(state["memory_limit_mib"], 768)
 
     def test_downloads_save_automatically(self):
         with tempfile.TemporaryDirectory(prefix="lightview-test-") as directory:

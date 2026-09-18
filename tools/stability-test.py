@@ -32,6 +32,7 @@ SITES = [
     ("Yahoo", "https://www.yahoo.com/"),
     ("Bing", "https://www.bing.com/"),
     ("Cloudflare", "https://www.cloudflare.com/"),
+    ("CNN", "https://www.cnn.com/"),
 ]
 
 
@@ -54,7 +55,11 @@ def main():
 
     initial = ctl.request(args.socket, "status", timeout=3)
     fields = ["round", "site", "requested_url", "final_url", "title", "ready_state",
-              "load_error", "load_timed_out", "web_process_stopped", "pss_mib", "rss_mib", "processes"]
+              "load_error", "load_timed_out", "engine_state", "last_committed_uri",
+              "running_mode",
+              "memory_kill_threshold_mib", "generation_before", "generation_after",
+              "reset_count_before", "reset_count_after", "reset_during_site",
+              "last_termination_reason", "pss_mib", "rss_mib", "processes"]
     rows = []
     crashed = False
     for round_number in range(1, args.rounds + 1):
@@ -62,6 +67,13 @@ def main():
             row = {field: "" for field in fields}
             row.update(round=round_number, site=name, requested_url=url)
             try:
+                before = ctl.request(args.socket, "status", timeout=3)
+                row.update(
+                    generation_before=before["web_process_generation"],
+                    reset_count_before=before["reset_count"],
+                    running_mode=before["running_mode"],
+                    memory_kill_threshold_mib=before["memory_kill_threshold_mib"],
+                )
                 ctl.request(args.socket, "open", timeout=3, uri=url)
                 deadline = time.monotonic() + args.load_timeout
                 state = None
@@ -73,7 +85,14 @@ def main():
                 row["load_timed_out"] = bool(state and state["loading"])
                 time.sleep(args.settle)
                 state = ctl.request(args.socket, "status", timeout=3)
-                row["web_process_stopped"] = state["load_error"] == "Web process stopped. Reload to recover."
+                row.update(
+                    engine_state=state["engine_state"],
+                    last_committed_uri=state["last_committed_uri"],
+                    generation_after=state["web_process_generation"],
+                    reset_count_after=state["reset_count"],
+                    reset_during_site=state["reset_count"] > before["reset_count"],
+                    last_termination_reason=state["last_termination_reason"] or "",
+                )
                 try:
                     page = ctl.request(args.socket, "eval", timeout=5,
                         script="({url: String(location.href), title: String(document.title), ready: String(document.readyState)})")
@@ -87,7 +106,8 @@ def main():
                            pss_mib=usage["total_pss_mib"], rss_mib=usage["total_rss_mib"],
                            processes=len(usage["processes"]))
                 print(f"round {round_number} {name}: ready={row['ready_state']} "
-                      f"error={bool(row['load_error'])} PSS={row['pss_mib']} MiB", flush=True)
+                      f"error={bool(row['load_error'])} reset={row['reset_during_site']} "
+                      f"PSS={row['pss_mib']} MiB", flush=True)
             except Exception as error:
                 try:
                     ctl.request(args.socket, "status", timeout=2)
@@ -112,7 +132,9 @@ def main():
     print(json.dumps({"output": str(args.output), "navigations": len(rows),
                       "survived": not crashed,
                       "max_pss_mib": max((float(r["pss_mib"]) for r in rows if r["pss_mib"] != ""), default=None),
-                      "load_errors": sum(bool(r["load_error"]) for r in rows)}, indent=2))
+                      "load_errors": sum(bool(r["load_error"]) for r in rows),
+                      "load_timeouts": sum(r["load_timed_out"] is True for r in rows),
+                      "sites_with_resets": sum(r["reset_during_site"] is True for r in rows)}, indent=2))
     return 1 if crashed else 0
 
 

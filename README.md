@@ -40,10 +40,21 @@ launcher does not change your default browser. Builds and installation need the
 distribution's development libraries; fetching packages requires network access.
 
 Keyboard shortcuts: Ctrl+L focuses the address, Ctrl+R or F5 reloads, Alt+Left /
-Alt+Right navigate history, Escape stops loading, and Ctrl+Q quits. Enter a URL or
-an absolute local HTML path. Bare hostnames use HTTPS. There is no search engine
+Alt+Right navigate history, Escape stops loading, and Ctrl+Q quits. The toolbar
+also provides **Reset WebKit** and version-information buttons. Enter a URL or an
+absolute local HTML path. Bare hostnames use HTTPS. There is no search engine
 integration. User-initiated links targeting a new window are opened in the
 current view; separate popup windows are not implemented.
+
+The toolbar shows a compact running-mode label with live telemetry, for example
+`MODE:LM, 312M, CPU 8.4%`. Mode abbreviations are `N` (normal), `P` (private),
+`LM` (low memory), and `P/LM` (private low memory). It remains fully visible
+under Matchbox configurations that disable native title bars. The native title
+keeps the page title first and shows the same compact values. RAM is summed PSS
+for Lightview and its WebKit children; CPU is their
+aggregate usage and can exceed 100% when several processes use multiple logical
+CPUs. Values refresh every two seconds without a helper process or monitoring
+thread.
 
 Downloads save automatically to the user's standard Downloads directory. If a
 filename already exists, Lightview adds a numeric suffix instead of overwriting
@@ -61,15 +72,17 @@ it. Completion or failure appears in the status bar, with no destination prompt.
   cache when faster repeat visits matter more than minimum memory use.
 - Web and network processes use WebKit's memory-pressure handler with a 768 MiB
   per-process target. Cleanup starts before the target is reached. Override it
-  with `--memory-limit MIB` (128–65536); this is a pressure target rather than a
-  hard allocation cap.
+  with `--memory-limit MIB` (128–65536). A process that reaches four times the
+  configured target is terminated by WebKit; Lightview reports the reason and
+  automatically starts a fresh page process on `about:blank`.
 - `--low-memory` selects a 384 MiB target and disables WebRTC, WebGL, and
   accelerated 2D canvas. Images, audio, video, Media Source, encrypted media,
   WebAudio, and JavaScript remain enabled so ordinary and streaming sites work.
   Video-conferencing and graphics-heavy sites lose features. An explicit
-  `--memory-limit` overrides its 384 MiB default. The
-  pressure handler releases critical caches but does not automatically kill an
-  oversized page; use `lightviewctl reset` between heavy workflows when needed.
+  `--memory-limit` overrides its 384 MiB default. The resulting termination
+  threshold has a 3072 MiB floor per WebKit process so large news and media
+  pages do not enter a recovery loop. This is a
+  last-resort guard rather than a total browser memory cap.
 
 WebKit documents the cache model's effect on memory in its
 [cache API reference](https://webkitgtk.org/reference/webkit2gtk/stable/method.WebContext.set_cache_model.html).
@@ -79,7 +92,7 @@ not the obsolete WebKit1 engine.
 
 WebKit uses multiple processes for rendering and networking; one view does not
 mean one OS process. JavaScript heaps, video, GPU buffers, and the content itself
-can dominate memory. There is no fixed memory cap or universal low-RAM claim.
+can dominate memory. There is no fixed total-browser cap or universal low-RAM claim.
 JavaScript, WebGL, media, TLS checks, and process sandboxing are not disabled to
 reduce the measured footprint.
 
@@ -123,6 +136,7 @@ different sockets and different profiles (or `--private`) for multiple instances
 ```sh
 ./tools/lightviewctl open https://example.org --wait
 ./tools/lightviewctl status
+./tools/lightviewctl version
 ./tools/lightviewctl eval 'document.title'
 ./tools/lightviewctl wait 'document.querySelector("#search") !== null'
 ./tools/lightviewctl fill '#search' 'hello world'
@@ -130,6 +144,9 @@ different sockets and different profiles (or `--private`) for multiple instances
 ./tools/lightviewctl eval '({url: location.href, text: document.body.innerText})'
 ./tools/lightviewctl eval 'fetch("/api/data").then(r => r.json())'
 ./tools/lightviewctl reset
+./tools/lightviewctl reset --hard
+./tools/lightviewctl mode normal
+./tools/lightviewctl mode low-memory
 ./tools/lightviewctl quit
 ```
 
@@ -149,11 +166,32 @@ short expressions and client-side polling for long workflows. A timeout cancels
 the pending control operation; it is not a reliable way to interrupt an infinite
 JavaScript loop in the web process.
 
-`reset` terminates the current WebKit web process and opens `about:blank` in a
-fresh process. Use it after a heavy workflow when memory does not fall after
-ordinary navigation. It discards page state and history but keeps cookies and
-other data in the selected profile. The command acknowledges immediately; use
-`lightviewctl wait` afterward when a script must wait for the new blank page.
+`reset` terminates the current WebKit web process, opens `about:blank` in a fresh
+process, and waits until the replacement is ready. `reset --hard` also rebuilds
+the WebView and WebKit context. Both forms keep the GTK window, Lightview PID,
+profile, and control-socket path. They discard DOM and JavaScript state; profile
+cookies and persistent local storage remain available. The last committed URI
+is retained in `status` so an agent can decide whether to reopen it.
+
+Unexpected page-process crashes and WebKit memory-limit terminations use the
+same recovery path. Page commands receive a retryable `webkit_recovering` or
+`webkit_reset` protocol error while the engine is unavailable. Lightview does
+not replay state-changing automation commands. Repeated failures are bounded to
+prevent a restart loop; the toolbar reset action can retry from the reported
+`failed` state.
+
+Every manual or automatic reset turns the address bar red for five seconds so
+the operator can see that page state was replaced even when Matchbox hides the
+native title bar. `status.reset_flash_active` exposes the same indication to an
+agent.
+
+`version` returns the running Lightview and WebKitGTK versions. `version --show`
+also activates the same local GTK dialog as the toolbar information button and
+does not navigate or contact an update service. The dialog includes a **Low
+memory mode (LM)** checkbox. Changing it rebuilds WebKit on `about:blank` while
+keeping the Lightview window, PID, profile, and automation socket. The same
+switch is available to agents through `lightviewctl mode normal` and
+`lightviewctl mode low-memory`.
 
 `click` and `fill` use DOM APIs and dispatch synthetic events. They are useful
 for scripts but do not generate trusted physical input events. They cannot
@@ -174,13 +212,17 @@ connections to 16. Idle connections and slow readers do not block the GUI.
 
 | Command | Additional field | Result |
 | --- | --- | --- |
-| `status` | none | URI, title, loading state, load error, history state, memory mode/limit, private mode, PID |
+| `status` | none | Page state, running mode, title/toolbar telemetry, process-tree RAM/CPU, engine state/generation, recovery details, memory policy, version, and PID |
+| `version` | optional `show` boolean | Running Lightview and WebKitGTK versions |
 | `open` | `uri` string | `null` after navigation is requested |
 | `eval` | `script` string | JSON value after expression / promise completes |
-| `back`, `forward`, `reload`, `stop`, `reset` | none | `null` |
+| `back`, `forward`, `reload`, `stop` | none | `null` |
+| `reset` | optional `hard` boolean | Recovery operation and target generation |
+| `mode` | `low_memory` boolean | Switch mode and return the recovery operation |
 | `quit` | none | `null`, then exit |
 
-Failures use `{"ok":false,"error":"message"}`. Status exposes load failures
+Failures use `{"ok":false,"error":"message"}`. Retryable recovery failures also
+include stable `error_code` and `retryable` fields. Status exposes load failures
 separately because navigation is asynchronous. The socket directory must be
 private (`0700`), the socket is created under umask `0077`, and the server checks
 that the peer has the same UID. Any process running as your user can control the
@@ -197,8 +239,9 @@ make check
 
 The integration suite runs the real browser under Xvfb with a local HTTP fixture.
 It exercises module scripts, fetch, promises, DOM interaction, navigation,
-cookie/local-storage persistence, private-mode isolation, malformed requests,
-concurrent clients, profile locking, and socket lifecycle. It does not require
+soft and hard WebKit recovery, version reporting, cookie/local-storage
+persistence, private-mode isolation, malformed requests, concurrent clients,
+profile locking, and socket lifecycle. It does not require
 external sites, credentials, or login tokens. It does require a working display
 backend and a host that permits WebKit's process sandbox.
 

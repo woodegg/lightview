@@ -40,6 +40,11 @@ def wait_for(path, expression, timeout):
     while time.monotonic() < deadline:
         remaining = max(0.01, deadline - time.monotonic())
         state = request(path, "status", remaining)
+        if state.get("engine_state") == "failed":
+            raise RuntimeError(state.get("load_error") or "WebKit recovery failed")
+        if state.get("engine_state") != "ready":
+            time.sleep(min(0.1, max(0, deadline - time.monotonic())))
+            continue
         if state["load_error"]:
             raise RuntimeError(state["load_error"])
         try:
@@ -53,13 +58,33 @@ def wait_for(path, expression, timeout):
     raise TimeoutError(f"Wait timed out: {last_error}")
 
 
+def wait_for_recovery(path, operation, timeout):
+    deadline = time.monotonic() + timeout
+    target = operation["target_generation"]
+    while time.monotonic() < deadline:
+        state = request(path, "status", max(0.01, deadline - time.monotonic()))
+        if state["engine_state"] == "ready" and state["web_process_generation"] >= target:
+            return {**operation, "engine_state": "ready",
+                    "web_process_generation": state["web_process_generation"]}
+        if state["engine_state"] == "failed":
+            raise RuntimeError(state.get("load_error") or "WebKit recovery failed")
+        time.sleep(min(0.1, max(0, deadline - time.monotonic())))
+    raise TimeoutError("WebKit reset timed out")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--socket", default=default_socket(), help="browser control socket")
     parser.add_argument("--timeout", type=float, default=30, help="timeout in seconds")
     commands = parser.add_subparsers(dest="command", required=True)
-    for name in ("status", "back", "forward", "reload", "stop", "reset", "quit"):
+    for name in ("status", "back", "forward", "reload", "stop", "quit"):
         commands.add_parser(name)
+    version = commands.add_parser("version", help="query the running engine versions")
+    version.add_argument("--show", action="store_true", help="also activate the GTK version dialog")
+    reset = commands.add_parser("reset", help="restart the replaceable WebKit engine")
+    reset.add_argument("--hard", action="store_true", help="recreate the WebView and WebKit context")
+    mode = commands.add_parser("mode", help="switch the running mode and rebuild WebKit")
+    mode.add_argument("value", choices=("normal", "low-memory"))
     open_parser = commands.add_parser("open")
     open_parser.add_argument("uri")
     open_parser.add_argument("--wait", action="store_true", help="wait for document load")
@@ -82,6 +107,12 @@ def main():
         else:
             if command == "open":
                 fields["uri"] = args.uri
+            elif command == "reset":
+                fields["hard"] = args.hard
+            elif command == "version":
+                fields["show"] = args.show
+            elif command == "mode":
+                fields["low_memory"] = args.value == "low-memory"
             elif command == "eval":
                 fields["script"] = sys.stdin.read() if args.script == "-" else args.script
             elif command in ("click", "fill"):
@@ -107,7 +138,9 @@ def main():
                 }})()"""
                 command = "eval"
             result = request(args.socket, command, args.timeout, **fields)
-            if args.command == "open" and args.wait:
+            if args.command in ("reset", "mode"):
+                result = wait_for_recovery(args.socket, result, args.timeout)
+            elif args.command == "open" and args.wait:
                 result = wait_for(args.socket, "document.readyState === 'complete'", args.timeout)
         print(json.dumps(result, ensure_ascii=False))
         return 0

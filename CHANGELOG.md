@@ -1,5 +1,39 @@
 # Changelog
 
+## 0.1.8 - 2026-09-18
+
+### Added
+
+- Add an accessible toolbar button that shows the running Lightview and
+  WebKitGTK versions from the same source as `lightview --version`.
+- Keep the GTK window and automation socket available while supervising WebKit
+  recovery. Expose engine state, web-process generation, reset history, last
+  termination reason, and the last committed URI through `status`.
+- Add a toolbar WebKit reset action, synchronous `lightviewctl reset`, and
+  `reset --hard` for rebuilding the WebView and WebKit context without changing
+  the Lightview PID or socket path.
+- Recover automatically from page-process crashes and WebKit memory-limit
+  terminations, with bounded retries and backend event logging.
+- Show compact telemetry such as `MODE:LM, 265M, CPU 1.0%` in the toolbar,
+  mirror it in the native title, and expose the same process-tree PSS and CPU
+  values through `status`. The toolbar remains visible when Matchbox disables
+  window title bars.
+
+### Changed
+
+- Configure WebKit's last-resort kill threshold at four times the selected
+  per-process memory-pressure target, with a 3072 MiB minimum that keeps heavy
+  news and media pages from being terminated prematurely.
+- Return machine-readable retry information when a page operation is cancelled
+  by recovery or arrives while the engine is unavailable.
+- Detect repeated automatic recovery over a five-minute window instead of
+  thirty seconds so a page cannot evade the recovery-loop guard.
+- Turn the address bar red for five seconds after every manual or automatic
+  WebKit reset and expose the active indication through `status`.
+- Add a low-memory checkbox to the version dialog and a matching
+  `lightviewctl mode` command. Mode changes rebuild WebKit while preserving the
+  main window, profile, PID, and automation socket.
+
 ## 0.1.7 - 2026-09-17
 
 ### Fixed
