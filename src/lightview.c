@@ -17,12 +17,12 @@
 #define MAX_REQUEST (1024 * 1024)
 #define MAX_RESPONSE (4 * 1024 * 1024)
 #define MAX_CLIENTS 16
-#define LIGHTVIEW_VERSION "0.1.8"
+#define LIGHTVIEW_VERSION "0.1.9"
 #define RECOVERY_TIMEOUT_SECONDS 10
 #define RECOVERY_BURST_SECONDS 300
 #define RECOVERY_BURST_LIMIT 2
 #define RESET_FLASH_SECONDS 5
-#define MINIMUM_KILL_THRESHOLD_MIB 3072
+#define DEFAULT_KILL_THRESHOLD_MIB 3072
 
 typedef enum {
     ENGINE_READY,
@@ -34,6 +34,7 @@ typedef enum {
 typedef struct {
     GtkWidget *window, *entry, *back, *forward, *message, *view_box, *telemetry;
     GtkWidget *reset_button, *version_button, *version_dialog, *mode_toggle;
+    GtkWidget *memory_protection_toggle, *memory_threshold_spin, *memory_apply_button;
     WebKitWebView *view;
     WebKitWebContext *context;
     WebKitWebsiteDataManager *manager;
@@ -43,7 +44,8 @@ typedef struct {
     GList *page_requests;
     char *socket_path, *load_error, *download_dir, *download_message;
     char *last_committed_uri, *last_termination_reason, *last_reset_at;
-    guint clients, memory_limit, memory_kill_threshold, downloads_active;
+    guint clients, memory_limit, memory_kill_threshold, configured_kill_threshold;
+    guint downloads_active;
     guint recovery_timeout, flash_timeout;
     guint resource_timer, resource_processes;
     guint64 web_process_generation, reset_count;
@@ -53,7 +55,8 @@ typedef struct {
     double cpu_percent;
     EngineState engine_state;
     gboolean private_mode, low_memory, memory_limit_explicit, browser_cache, no_images;
-    gboolean sandbox_enabled, hard_reset_used, mode_toggle_syncing;
+    gboolean memory_protection_enabled, sandbox_enabled, hard_reset_used;
+    gboolean mode_toggle_syncing, memory_controls_syncing;
 } Browser;
 
 typedef struct {
@@ -78,6 +81,7 @@ static void download_started(WebKitWebContext *context, WebKitDownload *download
 static void hard_engine_reset(Browser *b);
 static gboolean start_reset(Browser *b, const char *source);
 static gboolean switch_low_memory_mode(Browser *b, gboolean enabled);
+static gboolean switch_memory_policy(Browser *b, gboolean enabled, guint threshold);
 static void update_ui(Browser *b);
 
 static gboolean quit_browser(gpointer unused)
@@ -339,6 +343,15 @@ static void update_ui(Browser *b)
         b->engine_state != ENGINE_RESETTING && b->engine_state != ENGINE_RECOVERING);
     if (b->mode_toggle) gtk_widget_set_sensitive(b->mode_toggle,
         b->engine_state != ENGINE_RESETTING && b->engine_state != ENGINE_RECOVERING);
+    gboolean policy_controls_ready = b->engine_state != ENGINE_RESETTING &&
+        b->engine_state != ENGINE_RECOVERING;
+    if (b->memory_protection_toggle)
+        gtk_widget_set_sensitive(b->memory_protection_toggle, policy_controls_ready);
+    if (b->memory_threshold_spin)
+        gtk_widget_set_sensitive(b->memory_threshold_spin, policy_controls_ready &&
+            gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(b->memory_protection_toggle)));
+    if (b->memory_apply_button)
+        gtk_widget_set_sensitive(b->memory_apply_button, policy_controls_ready);
     gtk_widget_set_sensitive(b->back, ready && webkit_web_view_can_go_back(b->view));
     gtk_widget_set_sensitive(b->forward, ready && webkit_web_view_can_go_forward(b->view));
     gboolean loading = b->view && webkit_web_view_is_loading(b->view);
@@ -796,6 +809,10 @@ static void dispatch(Request *r)
         json_object_set_int_member(state, "memory_limit_mib", b->memory_limit);
         json_object_set_int_member(state, "memory_kill_threshold_mib",
             b->memory_kill_threshold);
+        json_object_set_boolean_member(state, "memory_protection_enabled",
+            b->memory_protection_enabled);
+        json_object_set_int_member(state, "configured_memory_kill_threshold_mib",
+            b->configured_kill_threshold);
         json_object_set_string_member(state, "download_dir", b->download_dir);
         json_object_set_int_member(state, "downloads_active", b->downloads_active);
         json_object_set_int_member(state, "pid", getpid());
@@ -817,6 +834,15 @@ static void dispatch(Request *r)
         json_object_set_boolean_member(state, "mode_toggle_active",
             b->mode_toggle && gtk_toggle_button_get_active(
                 GTK_TOGGLE_BUTTON(b->mode_toggle)));
+        json_object_set_boolean_member(state, "memory_protection_toggle_visible",
+            b->memory_protection_toggle && gtk_widget_get_visible(
+                b->memory_protection_toggle));
+        json_object_set_boolean_member(state, "memory_protection_toggle_active",
+            b->memory_protection_toggle && gtk_toggle_button_get_active(
+                GTK_TOGGLE_BUTTON(b->memory_protection_toggle)));
+        json_object_set_int_member(state, "memory_threshold_control_mib",
+            b->memory_threshold_spin ? gtk_spin_button_get_value_as_int(
+                GTK_SPIN_BUTTON(b->memory_threshold_spin)) : 0);
         json_object_set_boolean_member(state, "reset_flash_active", b->flash_timeout != 0);
         json_object_set_string_member(state, "engine_state", engine_state_name(b->engine_state));
         json_object_set_int_member(state, "web_process_generation", b->web_process_generation);
@@ -916,6 +942,50 @@ static void dispatch(Request *r)
         json_object_set_int_member(operation, "operation_id", b->reset_count);
         json_object_set_int_member(operation, "target_generation",
             b->engine_state == ENGINE_READY ? b->web_process_generation : previous_generation + 1);
+        g_autoptr(JsonNode) node = json_node_new(JSON_NODE_OBJECT);
+        json_node_set_object(node, operation);
+        reply(r, node, NULL);
+        return;
+    }
+    if (g_str_equal(cmd, "memory-protection")) {
+        JsonNode *enabled_node = json_object_get_member(o, "enabled");
+        if (!enabled_node || !JSON_NODE_HOLDS_VALUE(enabled_node) ||
+            json_node_get_value_type(enabled_node) != G_TYPE_BOOLEAN) {
+            reply(r, NULL, "enabled must be a boolean");
+            return;
+        }
+        JsonNode *threshold_node = json_object_get_member(o, "kill_threshold_mib");
+        if (threshold_node && (!JSON_NODE_HOLDS_VALUE(threshold_node) ||
+            json_node_get_value_type(threshold_node) != G_TYPE_INT64)) {
+            reply(r, NULL, "kill_threshold_mib must be an integer");
+            return;
+        }
+        gint64 requested = threshold_node ? json_node_get_int(threshold_node) :
+            b->configured_kill_threshold;
+        if (requested < 512 || requested > 65536 ||
+            requested * 2 <= b->memory_limit) {
+            reply(r, NULL, "kill_threshold_mib must be between 512 and 65536 MiB and greater than half the memory-pressure limit");
+            return;
+        }
+        if (b->engine_state == ENGINE_RESETTING || b->engine_state == ENGINE_RECOVERING) {
+            reply_full(r, NULL, "WebKit recovery is already in progress",
+                "webkit_recovering", TRUE);
+            return;
+        }
+        gboolean enabled = json_node_get_boolean(enabled_node);
+        guint64 previous_generation = b->web_process_generation;
+        gboolean changed = switch_memory_policy(b, enabled, (guint)requested);
+        g_autoptr(JsonObject) operation = json_object_new();
+        json_object_set_boolean_member(operation, "memory_protection_enabled",
+            b->memory_protection_enabled);
+        json_object_set_int_member(operation, "memory_kill_threshold_mib",
+            b->memory_kill_threshold);
+        json_object_set_int_member(operation, "configured_memory_kill_threshold_mib",
+            b->configured_kill_threshold);
+        json_object_set_boolean_member(operation, "changed", changed);
+        json_object_set_int_member(operation, "operation_id", b->reset_count);
+        json_object_set_int_member(operation, "target_generation",
+            changed ? previous_generation + 1 : previous_generation);
         g_autoptr(JsonNode) node = json_node_new(JSON_NODE_OBJECT);
         json_node_set_object(node, operation);
         reply(r, node, NULL);
@@ -1176,13 +1246,14 @@ static WebKitWebView *create_web_view(Browser *b)
 
 static void configure_memory_policy(Browser *b)
 {
-    b->memory_kill_threshold = MAX((guint)MINIMUM_KILL_THRESHOLD_MIB,
-        b->memory_limit * 4);
+    b->memory_kill_threshold = b->memory_protection_enabled ?
+        b->configured_kill_threshold : 0;
     webkit_memory_pressure_settings_set_memory_limit(b->pressure, b->memory_limit);
     webkit_memory_pressure_settings_set_conservative_threshold(b->pressure, 0.25);
     webkit_memory_pressure_settings_set_strict_threshold(b->pressure, 0.50);
     webkit_memory_pressure_settings_set_kill_threshold(b->pressure,
-        (double)b->memory_kill_threshold / b->memory_limit);
+        b->memory_protection_enabled ?
+            (double)b->configured_kill_threshold / b->memory_limit : 0.0);
     webkit_memory_pressure_settings_set_poll_interval(b->pressure, 15.0);
     webkit_website_data_manager_set_memory_pressure_settings(b->pressure);
 }
@@ -1231,6 +1302,44 @@ static gboolean switch_low_memory_mode(Browser *b, gboolean enabled)
     return TRUE;
 }
 
+static void sync_memory_controls(Browser *b)
+{
+    if (!b->memory_protection_toggle || !b->memory_threshold_spin) return;
+    b->memory_controls_syncing = TRUE;
+    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(b->memory_protection_toggle),
+        b->memory_protection_enabled);
+    gtk_spin_button_set_value(GTK_SPIN_BUTTON(b->memory_threshold_spin),
+        b->configured_kill_threshold);
+    gtk_widget_set_sensitive(b->memory_threshold_spin, b->memory_protection_enabled &&
+        b->engine_state != ENGINE_RESETTING && b->engine_state != ENGINE_RECOVERING);
+    b->memory_controls_syncing = FALSE;
+}
+
+static gboolean switch_memory_policy(Browser *b, gboolean enabled, guint threshold)
+{
+    gboolean active_change = b->memory_protection_enabled != enabled;
+    gboolean threshold_change = b->configured_kill_threshold != threshold;
+    if (!active_change && !threshold_change) {
+        sync_memory_controls(b);
+        return FALSE;
+    }
+    if (b->engine_state == ENGINE_RESETTING || b->engine_state == ENGINE_RECOVERING)
+        return FALSE;
+
+    b->memory_protection_enabled = enabled;
+    b->configured_kill_threshold = threshold;
+    configure_memory_policy(b);
+    sync_memory_controls(b);
+
+    b->recovery_burst_count = 0;
+    b->last_recovery_us = 0;
+    record_reset(b, enabled ? "memory-protection-change" :
+        "memory-protection-disabled");
+    b->engine_state = ENGINE_RECOVERING;
+    hard_engine_reset(b);
+    return TRUE;
+}
+
 static void low_memory_toggled(GtkToggleButton *toggle, gpointer data)
 {
     Browser *b = data;
@@ -1242,6 +1351,25 @@ static void low_memory_toggled(GtkToggleButton *toggle, gpointer data)
         gtk_toggle_button_set_active(toggle, b->low_memory);
         b->mode_toggle_syncing = FALSE;
     }
+}
+
+static void memory_protection_draft_toggled(GtkToggleButton *toggle, gpointer data)
+{
+    Browser *b = data;
+    if (b->memory_controls_syncing || !b->memory_threshold_spin) return;
+    gtk_widget_set_sensitive(b->memory_threshold_spin,
+        gtk_toggle_button_get_active(toggle));
+}
+
+static void memory_policy_apply_clicked(GtkButton *button, gpointer data)
+{
+    (void)button;
+    Browser *b = data;
+    gboolean enabled = gtk_toggle_button_get_active(
+        GTK_TOGGLE_BUTTON(b->memory_protection_toggle));
+    guint threshold = (guint)gtk_spin_button_get_value_as_int(
+        GTK_SPIN_BUTTON(b->memory_threshold_spin));
+    if (!switch_memory_policy(b, enabled, threshold)) sync_memory_controls(b);
 }
 
 static void reset_clicked(GtkButton *button, gpointer data)
@@ -1282,6 +1410,46 @@ static void version_clicked(GtkButton *button, gpointer data)
     g_signal_connect(b->mode_toggle, "toggled", G_CALLBACK(low_memory_toggled), b);
     g_signal_connect(b->mode_toggle, "destroy", G_CALLBACK(gtk_widget_destroyed),
         &b->mode_toggle);
+
+    GtkWidget *memory_grid = gtk_grid_new();
+    gtk_grid_set_column_spacing(GTK_GRID(memory_grid), 6);
+    gtk_grid_set_row_spacing(GTK_GRID(memory_grid), 6);
+    b->memory_protection_toggle = gtk_check_button_new_with_label(
+        "WebKit memory kill protection");
+    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(b->memory_protection_toggle),
+        b->memory_protection_enabled);
+    GtkAdjustment *threshold_adjustment = gtk_adjustment_new(
+        b->configured_kill_threshold,
+        MAX(512.0, (double)b->memory_limit / 2.0 + 1.0), 65536.0,
+        256.0, 1024.0, 0.0);
+    b->memory_threshold_spin = gtk_spin_button_new(threshold_adjustment, 1.0, 0);
+    gtk_spin_button_set_numeric(GTK_SPIN_BUTTON(b->memory_threshold_spin), TRUE);
+    gtk_widget_set_sensitive(b->memory_threshold_spin, b->memory_protection_enabled);
+    GtkWidget *threshold_label = gtk_label_new("Kill threshold (MiB)");
+    gtk_label_set_xalign(GTK_LABEL(threshold_label), 0);
+    b->memory_apply_button = gtk_button_new_with_label("Apply memory policy");
+    GtkWidget *memory_note = gtk_label_new(
+        "When disabled, WebKit will not kill a page for excessive memory.\n"
+        "The operating system or container may still terminate it.");
+    gtk_label_set_xalign(GTK_LABEL(memory_note), 0);
+    gtk_label_set_line_wrap(GTK_LABEL(memory_note), TRUE);
+    gtk_grid_attach(GTK_GRID(memory_grid), b->memory_protection_toggle, 0, 0, 2, 1);
+    gtk_grid_attach(GTK_GRID(memory_grid), threshold_label, 0, 1, 1, 1);
+    gtk_grid_attach(GTK_GRID(memory_grid), b->memory_threshold_spin, 1, 1, 1, 1);
+    gtk_grid_attach(GTK_GRID(memory_grid), b->memory_apply_button, 0, 2, 2, 1);
+    gtk_grid_attach(GTK_GRID(memory_grid), memory_note, 0, 3, 2, 1);
+    gtk_box_pack_start(GTK_BOX(gtk_message_dialog_get_message_area(
+        GTK_MESSAGE_DIALOG(b->version_dialog))), memory_grid, FALSE, FALSE, 6);
+    g_signal_connect(b->memory_protection_toggle, "toggled",
+        G_CALLBACK(memory_protection_draft_toggled), b);
+    g_signal_connect(b->memory_apply_button, "clicked",
+        G_CALLBACK(memory_policy_apply_clicked), b);
+    g_signal_connect(b->memory_protection_toggle, "destroy",
+        G_CALLBACK(gtk_widget_destroyed), &b->memory_protection_toggle);
+    g_signal_connect(b->memory_threshold_spin, "destroy",
+        G_CALLBACK(gtk_widget_destroyed), &b->memory_threshold_spin);
+    g_signal_connect(b->memory_apply_button, "destroy",
+        G_CALLBACK(gtk_widget_destroyed), &b->memory_apply_button);
     g_signal_connect(b->version_dialog, "response", G_CALLBACK(close_dialog), NULL);
     g_signal_connect(b->version_dialog, "destroy", G_CALLBACK(gtk_widget_destroyed),
         &b->version_dialog);
@@ -1301,8 +1469,8 @@ int main(int argc, char **argv)
     Browser b = {0};
     b.engine_state = ENGINE_READY;
     b.web_process_generation = 1;
-    gboolean no_control = FALSE, version = FALSE;
-    gint memory_limit = 0;
+    gboolean no_control = FALSE, version = FALSE, disable_memory_kill = FALSE;
+    gint memory_limit = 0, memory_kill_threshold = 0;
     g_autofree char *profile = NULL;
     g_auto(GStrv) urls = NULL;
     GOptionEntry options[] = {
@@ -1312,6 +1480,8 @@ int main(int argc, char **argv)
         {"no-control", 0, 0, G_OPTION_ARG_NONE, &no_control, "Disable the automation socket", NULL},
         {"no-images", 0, 0, G_OPTION_ARG_NONE, &b.no_images, "Skip automatic image loading", NULL},
         {"memory-limit", 0, 0, G_OPTION_ARG_INT, &memory_limit, "WebKit per-process memory-pressure limit in MiB", "MIB"},
+        {"memory-kill-threshold", 0, 0, G_OPTION_ARG_INT, &memory_kill_threshold, "Terminate a WebKit process above this threshold", "MIB"},
+        {"disable-memory-kill", 0, 0, G_OPTION_ARG_NONE, &disable_memory_kill, "Never terminate WebKit for exceeding the memory threshold", NULL},
         {"low-memory", 0, 0, G_OPTION_ARG_NONE, &b.low_memory, "Reduce optional web features and use a 384 MiB limit", NULL},
         {"browser-cache", 0, 0, G_OPTION_ARG_NONE, &b.browser_cache, "Favor repeat-load speed over memory savings", NULL},
         {"version", 0, 0, G_OPTION_ARG_NONE, &version, "Show version", NULL},
@@ -1338,6 +1508,16 @@ int main(int argc, char **argv)
         g_printerr("--memory-limit must be between 128 and 65536 MiB.\n"); return 1;
     }
     b.memory_limit = (guint)memory_limit;
+    if (memory_kill_threshold == 0)
+        memory_kill_threshold = MIN(65536,
+            MAX(DEFAULT_KILL_THRESHOLD_MIB, memory_limit * 4));
+    if (memory_kill_threshold < 512 || memory_kill_threshold > 65536 ||
+        memory_kill_threshold * 2 <= memory_limit) {
+        g_printerr("--memory-kill-threshold must be between 512 and 65536 MiB and greater than half the memory-pressure limit.\n");
+        return 1;
+    }
+    b.memory_protection_enabled = !disable_memory_kill;
+    b.configured_kill_threshold = (guint)memory_kill_threshold;
     const char *downloads = g_get_user_special_dir(G_USER_DIRECTORY_DOWNLOAD);
     b.download_dir = downloads ? g_strdup(downloads) :
         g_build_filename(g_get_home_dir(), "Downloads", NULL);

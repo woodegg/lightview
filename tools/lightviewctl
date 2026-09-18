@@ -85,6 +85,11 @@ def main():
     reset.add_argument("--hard", action="store_true", help="recreate the WebView and WebKit context")
     mode = commands.add_parser("mode", help="switch the running mode and rebuild WebKit")
     mode.add_argument("value", choices=("normal", "low-memory"))
+    memory = commands.add_parser("memory-protection",
+        help="enable, disable, or change the WebKit memory kill threshold")
+    memory.add_argument("value", choices=("on", "off"))
+    memory.add_argument("--threshold", type=int, metavar="MIB",
+                        help="kill threshold to retain or apply")
     open_parser = commands.add_parser("open")
     open_parser.add_argument("uri")
     open_parser.add_argument("--wait", action="store_true", help="wait for document load")
@@ -113,6 +118,10 @@ def main():
                 fields["show"] = args.show
             elif command == "mode":
                 fields["low_memory"] = args.value == "low-memory"
+            elif command == "memory-protection":
+                fields["enabled"] = args.value == "on"
+                if args.threshold is not None:
+                    fields["kill_threshold_mib"] = args.threshold
             elif command == "eval":
                 fields["script"] = sys.stdin.read() if args.script == "-" else args.script
             elif command in ("click", "fill"):
@@ -138,7 +147,7 @@ def main():
                 }})()"""
                 command = "eval"
             result = request(args.socket, command, args.timeout, **fields)
-            if args.command in ("reset", "mode"):
+            if args.command in ("reset", "mode", "memory-protection"):
                 result = wait_for_recovery(args.socket, result, args.timeout)
             elif args.command == "open" and args.wait:
                 result = wait_for(args.socket, "document.readyState === 'complete'", args.timeout)

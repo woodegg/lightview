@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.1.9 - 2026-09-18
+
+### Added
+
+- Add runtime controls for WebKit's excessive-memory kill policy. The version
+  dialog can enable or disable the protection and set its MiB threshold, while
+  `lightviewctl memory-protection` exposes the same operation to agents without
+  changing the Lightview PID, profile, or control socket.
+- Add `--memory-kill-threshold` and `--disable-memory-kill` startup options and
+  expose the effective and configured policies through `status`.
+
 ## 0.1.8 - 2026-09-18
 
 ### Added

@@ -72,17 +72,19 @@ it. Completion or failure appears in the status bar, with no destination prompt.
   cache when faster repeat visits matter more than minimum memory use.
 - Web and network processes use WebKit's memory-pressure handler with a 768 MiB
   per-process target. Cleanup starts before the target is reached. Override it
-  with `--memory-limit MIB` (128–65536). A process that reaches four times the
-  configured target is terminated by WebKit; Lightview reports the reason and
-  automatically starts a fresh page process on `about:blank`.
+  with `--memory-limit MIB` (128–65536). The default excessive-memory kill
+  threshold is the larger of four times that target or 3072 MiB. Override it
+  with `--memory-kill-threshold MIB`, or use `--disable-memory-kill` to set
+  WebKit's kill threshold to zero. Disabling the kill retains the earlier
+  cleanup policies; it removes only WebKit's final memory termination.
 - `--low-memory` selects a 384 MiB target and disables WebRTC, WebGL, and
   accelerated 2D canvas. Images, audio, video, Media Source, encrypted media,
   WebAudio, and JavaScript remain enabled so ordinary and streaming sites work.
   Video-conferencing and graphics-heavy sites lose features. An explicit
-  `--memory-limit` overrides its 384 MiB default. The resulting termination
-  threshold has a 3072 MiB floor per WebKit process so large news and media
-  pages do not enter a recovery loop. This is a
-  last-resort guard rather than a total browser memory cap.
+  `--memory-limit` overrides its 384 MiB default. The default termination
+  threshold remains 3072 MiB. This is a last-resort guard rather than a total
+  browser memory cap. Disabling it can allow the operating system or container
+  to terminate the entire browser when memory is exhausted.
 
 WebKit documents the cache model's effect on memory in its
 [cache API reference](https://webkitgtk.org/reference/webkit2gtk/stable/method.WebContext.set_cache_model.html).
@@ -147,6 +149,8 @@ different sockets and different profiles (or `--private`) for multiple instances
 ./tools/lightviewctl reset --hard
 ./tools/lightviewctl mode normal
 ./tools/lightviewctl mode low-memory
+./tools/lightviewctl memory-protection on --threshold 4096
+./tools/lightviewctl memory-protection off
 ./tools/lightviewctl quit
 ```
 
@@ -193,6 +197,14 @@ keeping the Lightview window, PID, profile, and automation socket. The same
 switch is available to agents through `lightviewctl mode normal` and
 `lightviewctl mode low-memory`.
 
+The dialog also includes **WebKit memory kill protection**, an editable kill
+threshold in MiB, and an **Apply memory policy** button. Applying a changed
+policy rebuilds WebKit on `about:blank` while retaining the main process and
+control socket. A disabled policy reports an effective
+`memory_kill_threshold_mib` of `0` while retaining the configured value for the
+next enable. Agents can use `lightviewctl memory-protection on --threshold MIB`
+or `lightviewctl memory-protection off`.
+
 `click` and `fill` use DOM APIs and dispatch synthetic events. They are useful
 for scripts but do not generate trusted physical input events. They cannot
 bypass user-gesture requirements or cross-origin frame restrictions. This is a
@@ -219,6 +231,7 @@ connections to 16. Idle connections and slow readers do not block the GUI.
 | `back`, `forward`, `reload`, `stop` | none | `null` |
 | `reset` | optional `hard` boolean | Recovery operation and target generation |
 | `mode` | `low_memory` boolean | Switch mode and return the recovery operation |
+| `memory-protection` | `enabled` boolean and optional `kill_threshold_mib` integer | Apply the memory kill policy and return the recovery operation |
 | `quit` | none | `null`, then exit |
 
 Failures use `{"ok":false,"error":"message"}`. Retryable recovery failures also

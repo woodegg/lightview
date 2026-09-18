@@ -4,8 +4,8 @@ This document records accepted requirements for the next Lightview release.
 Items remain requirements until implementation, validation, and release work
 are completed.
 
-Release status: completed and released as 0.1.8 on 2026-09-18. The final scope
-contains LTV-008 through LTV-012.
+Release status: completed and released as 0.1.9 on 2026-09-18. The final scope
+adds LTV-013 to the requirements released in 0.1.8.
 
 ## LTV-008 — Version information button
 
@@ -211,3 +211,40 @@ Acceptance:
   control in both directions, and verifies its checked state, mode label,
   memory policy, and web-process generation.
 - PID and socket inode remain unchanged across both mode changes.
+
+## LTV-013 — Configurable WebKit memory kill protection
+
+Status: released in 0.1.9.
+
+Allow operators and automation agents to change or disable the WebKit
+excessive-memory termination policy independently of Normal and Low Memory
+modes. This addresses long-running infinite-scroll jobs that intentionally
+retain more than the default 3072 MiB threshold.
+
+Requirements:
+
+- Add a **WebKit memory kill protection** checkbox, editable MiB threshold, and
+  explicit apply action to the version-information dialog.
+- Keep the default protection enabled at 3072 MiB for ordinary Normal and Low
+  Memory launches.
+- Set WebKit's documented kill threshold to zero when protection is disabled,
+  while retaining its conservative and strict memory cleanup policies.
+- Preserve the configured nonzero threshold while protection is disabled so it
+  can be restored without re-entry.
+- Rebuild the WebView and WebKit context on `about:blank` after applying an
+  active policy change, while retaining the main PID, profile, and socket.
+- Expose `memory_protection_enabled`, the effective threshold, and the retained
+  configured threshold through `status`.
+- Provide equivalent startup options and a `memory-protection` automation
+  command that waits for the replacement WebKit generation.
+- Explain in the dialog and documentation that disabling WebKit termination
+  does not prevent an operating-system or container OOM kill.
+
+Acceptance:
+
+- Real GTK integration tests change the threshold, disable protection, and
+  re-enable it while verifying UI state and status fields.
+- The effective threshold is zero while disabled and the configured threshold
+  is restored when re-enabled.
+- The Lightview PID and control socket inode remain unchanged across all policy
+  changes.

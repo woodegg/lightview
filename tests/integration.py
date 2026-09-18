@@ -310,6 +310,12 @@ class BrowserIntegration(unittest.TestCase):
             self.assertNotEqual(invalid.returncode, 0)
             self.assertIn("path is too long", invalid.stderr)
             self.assertEqual(list(Path(directory).iterdir()), [])
+            invalid_policy = subprocess.run(
+                [str(ROOT / "build/lightview"), "--private",
+                 "--memory-kill-threshold", "256", "--no-control"],
+                capture_output=True, text=True, timeout=10)
+            self.assertNotEqual(invalid_policy.returncode, 0)
+            self.assertIn("--memory-kill-threshold", invalid_policy.stderr)
             with browser(directory, "--private") as (path, _):
                 # A bound, non-listening port gives a deterministic refused connection.
                 with socket.socket() as refused:
@@ -330,6 +336,8 @@ class BrowserIntegration(unittest.TestCase):
                 self.assertTrue(state["low_memory"])
                 self.assertEqual(state["memory_limit_mib"], 384)
                 self.assertEqual(state["memory_kill_threshold_mib"], 3072)
+                self.assertTrue(state["memory_protection_enabled"])
+                self.assertEqual(state["configured_memory_kill_threshold_mib"], 3072)
                 self.assertEqual(state["running_mode"], "Private / Low memory")
                 self.assertEqual(state["running_mode_short"], "P/LM")
                 self.assertIn(" · MODE:P/LM, ", state["window_title"])
@@ -343,6 +351,12 @@ class BrowserIntegration(unittest.TestCase):
                 media_apis = self.cli(path, "eval",
                     "({audioContext: typeof AudioContext, mediaSource: typeof MediaSource})")
                 self.assertEqual(media_apis, {"audioContext": "function", "mediaSource": "function"})
+            with browser(directory, "--private", "--memory-kill-threshold", "4096",
+                         "--disable-memory-kill") as (path, _):
+                state = self.cli(path, "status")
+                self.assertFalse(state["memory_protection_enabled"])
+                self.assertEqual(state["memory_kill_threshold_mib"], 0)
+                self.assertEqual(state["configured_memory_kill_threshold_mib"], 4096)
 
     def test_version_sources_match(self):
         command_line = subprocess.check_output(
@@ -359,6 +373,9 @@ class BrowserIntegration(unittest.TestCase):
                 self.assertTrue(state["version_dialog_visible"])
                 self.assertTrue(state["mode_toggle_visible"])
                 self.assertFalse(state["mode_toggle_active"])
+                self.assertTrue(state["memory_protection_toggle_visible"])
+                self.assertTrue(state["memory_protection_toggle_active"])
+                self.assertEqual(state["memory_threshold_control_mib"], 3072)
                 self.assertEqual(state["uri"], before["uri"])
                 self.assertEqual(state["engine_state"], "ready")
                 self.assertEqual(state["web_process_generation"], 1)
@@ -378,6 +395,32 @@ class BrowserIntegration(unittest.TestCase):
                 self.assertFalse(state["low_memory"])
                 self.assertFalse(state["mode_toggle_active"])
                 self.assertEqual(state["memory_limit_mib"], 768)
+                generation = state["web_process_generation"]
+                changed = self.cli(path, "memory-protection", "on", "--threshold", "4096")
+                self.assertTrue(changed["changed"])
+                state = self.cli(path, "status")
+                self.assertTrue(state["memory_protection_enabled"])
+                self.assertEqual(state["memory_kill_threshold_mib"], 4096)
+                self.assertEqual(state["configured_memory_kill_threshold_mib"], 4096)
+                self.assertEqual(state["memory_threshold_control_mib"], 4096)
+                self.assertGreater(state["web_process_generation"], generation)
+                generation = state["web_process_generation"]
+                changed = self.cli(path, "memory-protection", "off")
+                self.assertTrue(changed["changed"])
+                state = self.cli(path, "status")
+                self.assertFalse(state["memory_protection_enabled"])
+                self.assertFalse(state["memory_protection_toggle_active"])
+                self.assertEqual(state["memory_kill_threshold_mib"], 0)
+                self.assertEqual(state["configured_memory_kill_threshold_mib"], 4096)
+                self.assertEqual(state["pid"], process.pid)
+                self.assertEqual(os.stat(path).st_ino, socket_inode)
+                self.assertGreater(state["web_process_generation"], generation)
+                changed = self.cli(path, "memory-protection", "on")
+                self.assertTrue(changed["changed"])
+                state = self.cli(path, "status")
+                self.assertTrue(state["memory_protection_enabled"])
+                self.assertTrue(state["memory_protection_toggle_active"])
+                self.assertEqual(state["memory_kill_threshold_mib"], 4096)
 
     def test_downloads_save_automatically(self):
         with tempfile.TemporaryDirectory(prefix="lightview-test-") as directory:
