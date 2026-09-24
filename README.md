@@ -111,6 +111,71 @@ Unreadable processes make the report incomplete, and GPU allocations are not
 fully represented. Compare the same pages, load/idle intervals, display setup,
 WebKit version, and cache state when evaluating memory changes.
 
+### Idle hibernation and agent leases
+
+Lightview defaults to hibernating WebKit after **3600 seconds (60 minutes)**.
+Use `--idle-hibernate SECONDS` at startup or
+`lightviewctl hibernate-after SECONDS` while running to change the interval
+(0–86400 seconds); `0` disables automatic hibernation. Changing the interval
+starts a fresh idle countdown and does not wake an already suspended engine.
+The Version window also has a **Hibernate after idle (seconds)** control and
+**Apply idle time** button for the same setting. Its value stays synchronized
+when changed through `lightviewctl`. The setting applies to the running
+instance; use the startup option to choose a value for future launches.
+After the interval without a page operation or UI input, it destroys the
+WebKit view and context while keeping the GTK window,
+main PID, profile lock, and control socket. It waits while a page is loading,
+audio is playing, a download is active, or an automation JavaScript request is
+running. `status` reports `engine_state: "suspended"` without waking WebKit.
+`open URL` recreates WebKit and loads that URL; `wake` recreates it on
+`about:blank`. Other page commands sent while suspended start waking WebKit but
+return a retryable error, so the agent must decide which page to reopen.
+Hibernation discards DOM, JavaScript variables, form state, and page history;
+the last committed URL remains in `status` for an explicit reopen. Background
+page JavaScript alone does not count as user activity.
+
+An agent can reserve the instance independently of WebKit's state. `lease
+acquire` returns a token valid for 120 seconds by default; `--lease-ttl SECONDS`
+changes that lifetime. Pass the token with `--lease TOKEN` or the
+`LIGHTVIEW_LEASE` environment variable for navigation, script, reset, and quit
+commands. `lease renew` extends it, `lease release` frees it, and expiry releases
+it automatically. A reservation does not keep WebKit awake. `status` and
+`version` remain readable without a token, and the human-operated window can
+still be used. This prevents accidental agent collisions, not access by other
+processes running under the same Unix user. A command carrying an expired or
+released token is rejected instead of silently running without a reservation.
+
+```sh
+./build/lightview --private --low-memory --idle-hibernate 300 \
+  --socket "$XDG_RUNTIME_DIR/lightview-agent/control.sock" about:blank
+# In another terminal:
+./tools/lightviewctl --socket "$XDG_RUNTIME_DIR/lightview-agent/control.sock" lease acquire
+LIGHTVIEW_LEASE=TOKEN ./tools/lightviewctl \
+  --socket "$XDG_RUNTIME_DIR/lightview-agent/control.sock" open https://example.org --wait
+LIGHTVIEW_LEASE=TOKEN ./tools/lightviewctl \
+  --socket "$XDG_RUNTIME_DIR/lightview-agent/control.sock" lease renew
+LIGHTVIEW_LEASE=TOKEN ./tools/lightviewctl \
+  --socket "$XDG_RUNTIME_DIR/lightview-agent/control.sock" hibernate-after 3600
+```
+
+The repeatable blank-page measurement is `python3 tests/measure_hibernation.py`
+under a working graphical display. In this development container, run it under
+`dbus-run-session -- xvfb-run -a` with the test-only WebKit sandbox override
+documented below. The WebKit network process may remain after the page process
+exits, so the suspended process-tree PSS is not zero.
+
+On this host with WebKitGTK 2.52.6, a blank low-memory private instance under
+Xvfb measured **300.72 MiB PSS active**, **129.39 MiB PSS after 20 seconds
+suspended**, and **287.59 MiB PSS after waking**. The suspended total comprised
+108.14 MiB in the Lightview main process and 21.25 MiB in WebKit's network
+process; the web content process had exited. An isolated persistent profile
+measured 303.47 MiB active and 131.74 MiB suspended after five seconds. These
+are local measurements, not a fixed memory budget or a result for heavy pages.
+An isolated persistent-profile instance on XFCE Display `:1` measured
+296.64 MiB active and 143.00 MiB suspended; its web content process exited
+while the network process remained. The local desktop and Xvfb have different
+process-sharing and display costs.
+
 ## Profiles
 
 Cookies and website data are stored in `$XDG_DATA_HOME/lightview` (normally
@@ -125,6 +190,23 @@ mode `0700`. Only one running browser may use a persistent profile at a time.
 `--private` uses an ephemeral WebKit data manager and cannot be combined with
 `--profile`. It avoids persistent website data, but is not an anonymity feature
 or a promise that the operating system never writes process memory to disk.
+
+The version window shows the active profile and provides **Choose profile
+folder…**, a standard local folder chooser that can create a directory. A newly
+selected empty folder is made private (`0700`) and locked before Lightview
+rebuilds WebKit on `about:blank`. The Lightview PID, window, control socket, and
+agent lease remain unchanged. DOM and history are discarded, while the selected
+profile's cookies and site storage are loaded. An invalid or already locked
+folder leaves the current WebKit session intact. An active download must finish
+before switching. Selecting a persistent folder from a private session changes
+that session to persistent mode.
+
+If `--profile DIR` points to a profile already locked by another browser at
+startup, Lightview opens the same folder chooser with the lock error shown.
+Select or create another folder to continue startup. An invalid or locked
+selection leaves the chooser open so you can retry; Cancel exits startup.
+The chooser in the version window has the same retry behavior, while Cancel
+there leaves the running browser unchanged.
 
 ## Script control
 
@@ -151,6 +233,7 @@ different sockets and different profiles (or `--private`) for multiple instances
 ./tools/lightviewctl mode low-memory
 ./tools/lightviewctl memory-protection on --threshold 4096
 ./tools/lightviewctl memory-protection off
+./tools/lightviewctl profile "$HOME/.local/share/lightview-work"
 ./tools/lightviewctl quit
 ```
 
@@ -232,6 +315,10 @@ connections to 16. Idle connections and slow readers do not block the GUI.
 | `reset` | optional `hard` boolean | Recovery operation and target generation |
 | `mode` | `low_memory` boolean | Switch mode and return the recovery operation |
 | `memory-protection` | `enabled` boolean and optional `kill_threshold_mib` integer | Apply the memory kill policy and return the recovery operation |
+| `profile` | `path` string | Lock the persistent profile, rebuild WebKit on `about:blank`, and return the recovery operation |
+| `wake` | none | Start a replacement WebKit view on `about:blank` and return the recovery operation |
+| `hibernate-after` | `seconds` integer (0–86400; 0 disables) | Set the idle interval without restarting the browser |
+| `lease` | `action` (`acquire`, `renew`, `release`) and `lease` token for renew/release | Reservation token and lifetime, or release result |
 | `quit` | none | `null`, then exit |
 
 Failures use `{"ok":false,"error":"message"}`. Retryable recovery failures also

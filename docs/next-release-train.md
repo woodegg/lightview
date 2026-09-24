@@ -4,8 +4,8 @@ This document records accepted requirements for the next Lightview release.
 Items remain requirements until implementation, validation, and release work
 are completed.
 
-Release status: completed and released as 0.1.9 on 2026-09-18. The final scope
-adds LTV-013 to the requirements released in 0.1.8.
+Release status: completed and released as 0.1.10 on 2026-09-24. The final scope
+adds LTV-014 and LTV-015 to the requirements released in 0.1.8 and 0.1.9.
 
 ## LTV-008 — Version information button
 
@@ -248,3 +248,67 @@ Acceptance:
   is restored when re-enabled.
 - The Lightview PID and control socket inode remain unchanged across all policy
   changes.
+
+## LTV-014 — Idle WebKit hibernation and agent leases
+
+Status: released in 0.1.10.
+
+Reduce the cost of long-lived automation instances by destroying an idle
+WebKit view and context while keeping the Lightview process, window, profile
+lock, and automation socket available. Allow an agent to reserve an instance
+independently of whether WebKit is awake.
+
+Requirements:
+
+- Hibernate WebKit after a configurable idle interval, defaulting to 3600
+  seconds, and allow `0` to disable automatic hibernation.
+- Do not hibernate while loading, playing audio, downloading, or serving a
+  page-bound automation request.
+- Keep `status`, the main PID, window, profile lock, and socket available while
+  suspended. Wake on navigation and expose an explicit `wake` command.
+- Add the same idle interval control to the Version window, startup options,
+  and `lightviewctl`, with synchronized values and a fresh countdown after a
+  change.
+- Add expiring acquire, renew, and release agent leases. A lease must survive
+  WebKit hibernation and recovery without itself keeping WebKit awake.
+- Provide a repeatable process-tree PSS measurement tool for active,
+  suspended, and resumed states.
+
+Acceptance:
+
+- Integration tests verify suspension, wake, persistent site data, stable PID
+  and socket inode, lease retention, lease expiry, and runtime interval changes.
+- A GTK accessibility test edits and applies the Version-window idle control
+  without changing the WebKit generation.
+- Local measurements confirm that the Web content process exits and total PSS
+  falls while a blank instance is suspended.
+
+## LTV-015 — Runtime persistent-profile selection
+
+Status: released in 0.1.10.
+
+Allow an operator or automation agent to move a running private or persistent
+session to another persistent profile without changing connection information.
+
+Requirements:
+
+- Show the active profile and a standard folder chooser in the Version window;
+  allow the chooser to create a new directory.
+- Validate ownership and private permissions and acquire the new profile lock
+  before destroying the current WebKit session.
+- Rebuild WebKit on `about:blank` after a successful switch while preserving
+  the Lightview PID, window, socket, and agent lease.
+- Reject invalid or already locked profiles without changing the current page
+  or profile, and keep the graphical chooser open for another selection.
+- If the profile requested at startup is locked, open the same chooser and
+  continue startup with a different selected profile. Cancel exits startup.
+- Provide a matching `lightviewctl profile DIR` command.
+
+Acceptance:
+
+- Integration tests switch between isolated profiles and verify that each
+  profile retains its own local storage.
+- Tests verify stable PID, socket inode, and lease across switches and confirm
+  that a lock failure leaves the current generation and storage intact.
+- A real GTK chooser test starts with a locked profile, selects another folder,
+  and reaches a ready browser using the selected profile.

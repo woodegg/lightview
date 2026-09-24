@@ -16,13 +16,13 @@ def default_socket():
     return str(Path(runtime) / "lightview" / "control.sock")
 
 
-def request(path, command, timeout=30, **fields):
+def request(socket_path, command, timeout=30, **fields):
     payload = json.dumps({"command": command, **fields}).encode() + b"\n"
     if len(payload) > 1024 * 1024:
         raise ValueError("Request exceeds 1 MiB")
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
         connection.settimeout(timeout)
-        connection.connect(path)
+        connection.connect(socket_path)
         connection.sendall(payload)
         with connection.makefile("rb") as stream:
             line = stream.readline(4 * 1024 * 1024 + 2)
@@ -34,12 +34,15 @@ def request(path, command, timeout=30, **fields):
     return response["result"]
 
 
-def wait_for(path, expression, timeout):
+def wait_for(path, expression, timeout, lease=None):
     deadline = time.monotonic() + timeout
     last_error = "condition is false"
     while time.monotonic() < deadline:
         remaining = max(0.01, deadline - time.monotonic())
         state = request(path, "status", remaining)
+        if state.get("engine_state") == "suspended":
+            request(path, "wake", remaining, lease=lease)
+            continue
         if state.get("engine_state") == "failed":
             raise RuntimeError(state.get("load_error") or "WebKit recovery failed")
         if state.get("engine_state") != "ready":
@@ -49,7 +52,7 @@ def wait_for(path, expression, timeout):
             raise RuntimeError(state["load_error"])
         try:
             if request(path, "eval", max(0.01, deadline - time.monotonic()),
-                       script=f"Boolean({expression})"):
+                       script=f"Boolean({expression})", lease=lease):
                 return True
         except RuntimeError as error:
             # A navigation may destroy the previous JavaScript context.
@@ -76,9 +79,17 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--socket", default=default_socket(), help="browser control socket")
     parser.add_argument("--timeout", type=float, default=30, help="timeout in seconds")
+    parser.add_argument("--lease", default=os.environ.get("LIGHTVIEW_LEASE"),
+                        help="agent lease token (or set LIGHTVIEW_LEASE)")
     commands = parser.add_subparsers(dest="command", required=True)
     for name in ("status", "back", "forward", "reload", "stop", "quit"):
         commands.add_parser(name)
+    commands.add_parser("wake", help="wake a hibernated WebKit engine")
+    hibernate = commands.add_parser("hibernate-after",
+        help="set idle seconds before WebKit hibernates; 0 disables it")
+    hibernate.add_argument("seconds", type=int, metavar="SECONDS")
+    lease = commands.add_parser("lease", help="reserve, renew, or release this browser")
+    lease.add_argument("action", choices=("acquire", "renew", "release"))
     version = commands.add_parser("version", help="query the running engine versions")
     version.add_argument("--show", action="store_true", help="also activate the GTK version dialog")
     reset = commands.add_parser("reset", help="restart the replaceable WebKit engine")
@@ -90,6 +101,9 @@ def main():
     memory.add_argument("value", choices=("on", "off"))
     memory.add_argument("--threshold", type=int, metavar="MIB",
                         help="kill threshold to retain or apply")
+    profile = commands.add_parser("profile",
+        help="switch to a persistent profile folder and rebuild WebKit")
+    profile.add_argument("path", metavar="DIR")
     open_parser = commands.add_parser("open")
     open_parser.add_argument("uri")
     open_parser.add_argument("--wait", action="store_true", help="wait for document load")
@@ -107,8 +121,10 @@ def main():
         parser.error("--timeout must be a finite positive number")
     try:
         command, fields = args.command, {}
+        if args.lease:
+            fields["lease"] = args.lease
         if command == "wait":
-            result = wait_for(args.socket, args.expression, args.timeout)
+            result = wait_for(args.socket, args.expression, args.timeout, args.lease)
         else:
             if command == "open":
                 fields["uri"] = args.uri
@@ -122,6 +138,12 @@ def main():
                 fields["enabled"] = args.value == "on"
                 if args.threshold is not None:
                     fields["kill_threshold_mib"] = args.threshold
+            elif command == "profile":
+                fields["path"] = args.path
+            elif command == "lease":
+                fields["action"] = args.action
+            elif command == "hibernate-after":
+                fields["seconds"] = args.seconds
             elif command == "eval":
                 fields["script"] = sys.stdin.read() if args.script == "-" else args.script
             elif command in ("click", "fill"):
@@ -147,10 +169,11 @@ def main():
                 }})()"""
                 command = "eval"
             result = request(args.socket, command, args.timeout, **fields)
-            if args.command in ("reset", "mode", "memory-protection"):
+            if args.command in ("reset", "mode", "memory-protection", "profile", "wake"):
                 result = wait_for_recovery(args.socket, result, args.timeout)
             elif args.command == "open" and args.wait:
-                result = wait_for(args.socket, "document.readyState === 'complete'", args.timeout)
+                result = wait_for(args.socket, "document.readyState === 'complete'",
+                                  args.timeout, args.lease)
         print(json.dumps(result, ensure_ascii=False))
         return 0
     except (OSError, ValueError, RuntimeError) as error:

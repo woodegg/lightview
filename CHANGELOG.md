@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.1.10 - 2026-09-24
+
+### Added
+
+- Add opt-in idle WebKit hibernation while keeping the Lightview window, PID,
+  profile, and automation socket alive. Opening a URL wakes WebKit on demand.
+- Add expiring agent leases independent of short-lived control connections.
+  Lease renewal and status checks do not prevent hibernation.
+- Add an isolated process-tree PSS measurement script for the blank-page
+  active, suspended, and resumed states.
+- Default idle hibernation to 60 minutes, with configurable startup and
+  `lightviewctl hibernate-after` runtime intervals.
+- Add a profile folder chooser to the version window and a matching
+  `lightviewctl profile DIR` command. Switching profiles rebuilds WebKit while
+  preserving the Lightview process, control socket, and agent lease.
+- When a startup profile is already locked, open the same folder chooser to
+  select or create another profile. Invalid selections keep the chooser open.
+- Add an idle-hibernation interval control to the Version window, synchronized
+  with the startup setting and `lightviewctl hibernate-after`.
+
 ## 0.1.9 - 2026-09-18
 
 ### Added

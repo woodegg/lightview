@@ -13,19 +13,26 @@
 #include <sys/stat.h>
 #include <sys/un.h>
 #include <unistd.h>
+#ifdef __GLIBC__
+#include <malloc.h>
+#endif
 
 #define MAX_REQUEST (1024 * 1024)
 #define MAX_RESPONSE (4 * 1024 * 1024)
 #define MAX_CLIENTS 16
-#define LIGHTVIEW_VERSION "0.1.9"
+#define LIGHTVIEW_VERSION "0.1.10"
 #define RECOVERY_TIMEOUT_SECONDS 10
 #define RECOVERY_BURST_SECONDS 300
 #define RECOVERY_BURST_LIMIT 2
 #define RESET_FLASH_SECONDS 5
 #define DEFAULT_KILL_THRESHOLD_MIB 3072
+#define DEFAULT_LEASE_SECONDS 120
+#define DEFAULT_IDLE_HIBERNATE_SECONDS 3600
+#define MAX_IDLE_HIBERNATE_SECONDS 86400
 
 typedef enum {
     ENGINE_READY,
+    ENGINE_SUSPENDED,
     ENGINE_RESETTING,
     ENGINE_RECOVERING,
     ENGINE_FAILED
@@ -35,6 +42,8 @@ typedef struct {
     GtkWidget *window, *entry, *back, *forward, *message, *view_box, *telemetry;
     GtkWidget *reset_button, *version_button, *version_dialog, *mode_toggle;
     GtkWidget *memory_protection_toggle, *memory_threshold_spin, *memory_apply_button;
+    GtkWidget *idle_hibernate_spin, *idle_hibernate_apply_button;
+    GtkWidget *profile_label, *profile_button;
     WebKitWebView *view;
     WebKitWebContext *context;
     WebKitWebsiteDataManager *manager;
@@ -42,17 +51,20 @@ typedef struct {
     WebKitMemoryPressureSettings *pressure;
     GSocketService *service;
     GList *page_requests;
-    char *socket_path, *load_error, *download_dir, *download_message;
+    char *socket_path, *profile_path, *load_error, *download_dir, *download_message;
+    char *lease_token;
     char *last_committed_uri, *last_termination_reason, *last_reset_at;
     guint clients, memory_limit, memory_kill_threshold, configured_kill_threshold;
+    guint idle_hibernate_seconds, lease_seconds, hibernate_timer;
     guint downloads_active;
     guint recovery_timeout, flash_timeout;
     guint resource_timer, resource_processes;
     guint64 web_process_generation, reset_count;
     guint64 memory_pss_kib, previous_cpu_ticks;
     guint recovery_burst_count;
-    gint64 last_recovery_us, previous_cpu_sample_us;
+    gint64 last_recovery_us, previous_cpu_sample_us, last_activity_us, lease_expires_us;
     double cpu_percent;
+    int profile_fd;
     EngineState engine_state;
     gboolean private_mode, low_memory, memory_limit_explicit, browser_cache, no_images;
     gboolean memory_protection_enabled, sandbox_enabled, hard_reset_used;
@@ -82,7 +94,24 @@ static void hard_engine_reset(Browser *b);
 static gboolean start_reset(Browser *b, const char *source);
 static gboolean switch_low_memory_mode(Browser *b, gboolean enabled);
 static gboolean switch_memory_policy(Browser *b, gboolean enabled, guint threshold);
+static gboolean wake_engine(Browser *b, const char *uri);
+static void set_idle_hibernate(Browser *b, guint seconds);
+static gboolean switch_profile(Browser *b, const char *path, GError **error);
 static void update_ui(Browser *b);
+
+static void note_activity(Browser *b)
+{
+    b->last_activity_us = g_get_monotonic_time();
+}
+
+static gboolean lease_active(Browser *b)
+{
+    if (b->lease_token && g_get_monotonic_time() >= b->lease_expires_us) {
+        g_clear_pointer(&b->lease_token, g_free);
+        b->lease_expires_us = 0;
+    }
+    return b->lease_token != NULL;
+}
 
 static gboolean quit_browser(gpointer unused)
 {
@@ -180,6 +209,7 @@ static const char *engine_state_name(EngineState state)
 {
     switch (state) {
     case ENGINE_READY: return "ready";
+    case ENGINE_SUSPENDED: return "suspended";
     case ENGINE_RESETTING: return "resetting";
     case ENGINE_RECOVERING: return "recovering";
     case ENGINE_FAILED: return "failed";
@@ -338,7 +368,7 @@ static void update_ui(Browser *b)
     if (!gtk_widget_has_focus(b->entry))
         gtk_entry_set_text(GTK_ENTRY(b->entry), uri ? uri : "");
     gboolean ready = b->engine_state == ENGINE_READY && b->view;
-    gtk_widget_set_sensitive(b->entry, ready);
+    gtk_widget_set_sensitive(b->entry, ready || b->engine_state == ENGINE_SUSPENDED);
     if (b->reset_button) gtk_widget_set_sensitive(b->reset_button,
         b->engine_state != ENGINE_RESETTING && b->engine_state != ENGINE_RECOVERING);
     if (b->mode_toggle) gtk_widget_set_sensitive(b->mode_toggle,
@@ -352,11 +382,15 @@ static void update_ui(Browser *b)
             gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(b->memory_protection_toggle)));
     if (b->memory_apply_button)
         gtk_widget_set_sensitive(b->memory_apply_button, policy_controls_ready);
+    if (b->profile_button)
+        gtk_widget_set_sensitive(b->profile_button, policy_controls_ready &&
+            b->downloads_active == 0);
     gtk_widget_set_sensitive(b->back, ready && webkit_web_view_can_go_back(b->view));
     gtk_widget_set_sensitive(b->forward, ready && webkit_web_view_can_go_forward(b->view));
     gboolean loading = b->view && webkit_web_view_is_loading(b->view);
     const char *engine_message = NULL;
-    if (b->engine_state == ENGINE_RESETTING) engine_message = "Resetting WebKit…";
+    if (b->engine_state == ENGINE_SUSPENDED) engine_message = "WebKit sleeping — open a URL to wake it.";
+    else if (b->engine_state == ENGINE_RESETTING) engine_message = "Resetting WebKit…";
     else if (b->engine_state == ENGINE_RECOVERING) engine_message = "Recovering WebKit…";
     else if (b->engine_state == ENGINE_FAILED) engine_message = "WebKit recovery failed; use Reset WebKit to retry.";
     const char *message = engine_message ? engine_message : (b->load_error ? b->load_error :
@@ -389,6 +423,13 @@ static void notify_view(GObject *object, GParamSpec *pspec, gpointer data)
     update_ui(data);
 }
 
+static gboolean note_view_input(GtkWidget *widget, GdkEvent *event, gpointer data)
+{
+    (void)widget; (void)event;
+    note_activity(data);
+    return FALSE;
+}
+
 static void complete_recovery(Browser *b)
 {
     if (b->recovery_timeout) {
@@ -398,6 +439,7 @@ static void complete_recovery(Browser *b)
     b->engine_state = ENGINE_READY;
     b->hard_reset_used = FALSE;
     b->web_process_generation++;
+    note_activity(b);
     g_clear_pointer(&b->load_error, g_free);
     g_message("WebKit recovery ready: generation=%" G_GUINT64_FORMAT
         " reset_count=%" G_GUINT64_FORMAT, b->web_process_generation, b->reset_count);
@@ -407,6 +449,7 @@ static void complete_recovery(Browser *b)
 static void load_changed(WebKitWebView *view, WebKitLoadEvent event, gpointer data)
 {
     Browser *b = data;
+    if (event == WEBKIT_LOAD_STARTED || event == WEBKIT_LOAD_FINISHED) note_activity(b);
     if (event == WEBKIT_LOAD_STARTED) g_clear_pointer(&b->load_error, g_free);
     if (event == WEBKIT_LOAD_COMMITTED && b->engine_state == ENGINE_READY) {
         const char *uri = webkit_web_view_get_uri(view);
@@ -521,6 +564,7 @@ static void download_failed(WebKitDownload *download, GError *error, gpointer da
 static void download_finished(WebKitDownload *download, gpointer data)
 {
     Browser *b = data;
+    note_activity(b);
     if (b->downloads_active) b->downloads_active--;
     if (!g_object_get_data(G_OBJECT(download), "lightview-download-failed")) {
         const char *path = g_object_get_data(G_OBJECT(download), "lightview-download-path");
@@ -534,6 +578,7 @@ static void download_started(WebKitWebContext *context, WebKitDownload *download
 {
     (void)context;
     Browser *b = data;
+    note_activity(b);
     b->downloads_active++;
     g_free(b->download_message);
     b->download_message = g_strdup("Preparing download…");
@@ -688,6 +733,7 @@ static gboolean navigate(Browser *b, const char *input)
     if (b->engine_state != ENGINE_READY || !b->view) return FALSE;
     g_autofree char *uri = normalize_uri(input);
     if (!uri) return FALSE;
+    note_activity(b);
     g_clear_pointer(&b->load_error, g_free);
     webkit_web_view_load_uri(b->view, uri);
     return TRUE;
@@ -746,6 +792,7 @@ static void youtube_navigation_message(WebKitUserContentManager *manager,
 static void javascript_done(GObject *object, GAsyncResult *result, gpointer data)
 {
     Request *r = data;
+    note_activity(r->browser);
     if (r->page_bound) {
         r->browser->page_requests = g_list_remove(r->browser->page_requests, r);
         r->page_bound = FALSE;
@@ -793,6 +840,7 @@ static void dispatch(Request *r)
     const char *cmd = string_member(o, "command");
     if (!cmd) { reply(r, NULL, "command must be a string"); return; }
     if (g_str_equal(cmd, "status")) {
+        gboolean leased = lease_active(b);
         g_autoptr(JsonObject) state = json_object_new();
         const char *uri = b->view ? webkit_web_view_get_uri(b->view) : NULL;
         const char *title = b->view ? webkit_web_view_get_title(b->view) : NULL;
@@ -805,6 +853,8 @@ static void dispatch(Request *r)
         json_object_set_boolean_member(state, "can_go_forward",
             b->view && webkit_web_view_can_go_forward(b->view));
         json_object_set_boolean_member(state, "private", b->private_mode);
+        if (b->profile_path) json_object_set_string_member(state, "profile_path", b->profile_path);
+        else json_object_set_null_member(state, "profile_path");
         json_object_set_boolean_member(state, "low_memory", b->low_memory);
         json_object_set_int_member(state, "memory_limit_mib", b->memory_limit);
         json_object_set_int_member(state, "memory_kill_threshold_mib",
@@ -843,8 +893,22 @@ static void dispatch(Request *r)
         json_object_set_int_member(state, "memory_threshold_control_mib",
             b->memory_threshold_spin ? gtk_spin_button_get_value_as_int(
                 GTK_SPIN_BUTTON(b->memory_threshold_spin)) : 0);
+        json_object_set_boolean_member(state, "idle_hibernate_control_visible",
+            b->idle_hibernate_spin && gtk_widget_get_visible(b->idle_hibernate_spin));
+        json_object_set_int_member(state, "idle_hibernate_control_seconds",
+            b->idle_hibernate_spin ? gtk_spin_button_get_value_as_int(
+                GTK_SPIN_BUTTON(b->idle_hibernate_spin)) : 0);
+        json_object_set_boolean_member(state, "profile_button_visible",
+            b->profile_button && gtk_widget_get_visible(b->profile_button));
+        json_object_set_string_member(state, "profile_control_path",
+            b->profile_label ? gtk_label_get_text(GTK_LABEL(b->profile_label)) : "");
         json_object_set_boolean_member(state, "reset_flash_active", b->flash_timeout != 0);
         json_object_set_string_member(state, "engine_state", engine_state_name(b->engine_state));
+        json_object_set_int_member(state, "idle_hibernate_seconds", b->idle_hibernate_seconds);
+        json_object_set_boolean_member(state, "lease_active", leased);
+        json_object_set_int_member(state, "lease_expires_in_seconds", leased ?
+            (b->lease_expires_us - g_get_monotonic_time() + G_USEC_PER_SEC - 1) /
+                G_USEC_PER_SEC : 0);
         json_object_set_int_member(state, "web_process_generation", b->web_process_generation);
         json_object_set_int_member(state, "reset_count", b->reset_count);
         json_object_set_string_member(state, "last_committed_uri",
@@ -880,9 +944,114 @@ static void dispatch(Request *r)
         reply(r, node, NULL);
         return;
     }
+    if (g_str_equal(cmd, "lease")) {
+        const char *action = string_member(o, "action");
+        if (!action) { reply(r, NULL, "action must be acquire, renew, or release"); return; }
+        gboolean active = lease_active(b);
+        if (g_str_equal(action, "acquire")) {
+            if (active) {
+                reply_full(r, NULL, "Browser is reserved by another agent", "lease_locked", TRUE);
+                return;
+            }
+            b->lease_token = g_uuid_string_random();
+            b->lease_expires_us = g_get_monotonic_time() +
+                (gint64)b->lease_seconds * G_USEC_PER_SEC;
+        } else if (g_str_equal(action, "renew") || g_str_equal(action, "release")) {
+            const char *token = string_member(o, "lease");
+            if (!active || !token || !g_str_equal(token, b->lease_token)) {
+                reply_full(r, NULL, "A valid lease token is required", "lease_required", FALSE);
+                return;
+            }
+            if (g_str_equal(action, "release")) {
+                g_clear_pointer(&b->lease_token, g_free);
+                b->lease_expires_us = 0;
+            } else b->lease_expires_us = g_get_monotonic_time() +
+                (gint64)b->lease_seconds * G_USEC_PER_SEC;
+        } else { reply(r, NULL, "action must be acquire, renew, or release"); return; }
+        g_autoptr(JsonObject) result = json_object_new();
+        json_object_set_boolean_member(result, "active", b->lease_token != NULL);
+        if (b->lease_token) json_object_set_string_member(result, "token", b->lease_token);
+        json_object_set_int_member(result, "ttl_seconds", b->lease_seconds);
+        g_autoptr(JsonNode) node = json_node_new(JSON_NODE_OBJECT);
+        json_node_set_object(node, result);
+        reply(r, node, NULL);
+        return;
+    }
+    const char *token = string_member(o, "lease");
+    if (lease_active(b)) {
+        if (!token || !g_str_equal(token, b->lease_token)) {
+            reply_full(r, NULL, "Browser is reserved by another agent", "lease_locked", TRUE);
+            return;
+        }
+    } else if (token) {
+        reply_full(r, NULL, "Agent lease has expired or was released", "lease_expired", FALSE);
+        return;
+    }
+    if (g_str_equal(cmd, "hibernate-after")) {
+        JsonNode *seconds_node = json_object_get_member(o, "seconds");
+        if (!seconds_node || !JSON_NODE_HOLDS_VALUE(seconds_node) ||
+            json_node_get_value_type(seconds_node) != G_TYPE_INT64 ||
+            json_node_get_int(seconds_node) < 0 ||
+            json_node_get_int(seconds_node) > MAX_IDLE_HIBERNATE_SECONDS) {
+            reply(r, NULL, "seconds must be an integer from 0 to 86400");
+            return;
+        }
+        set_idle_hibernate(b, (guint)json_node_get_int(seconds_node));
+        g_autoptr(JsonObject) result = json_object_new();
+        json_object_set_int_member(result, "idle_hibernate_seconds",
+            b->idle_hibernate_seconds);
+        g_autoptr(JsonNode) node = json_node_new(JSON_NODE_OBJECT);
+        json_node_set_object(node, result);
+        reply(r, node, NULL);
+        return;
+    }
     if (g_str_equal(cmd, "quit")) {
         r->quit = TRUE;
         reply(r, NULL, NULL);
+        return;
+    }
+    if (g_str_equal(cmd, "profile")) {
+        const char *path = string_member(o, "path");
+        if (!path || !*path) {
+            reply(r, NULL, "path must be a non-empty profile folder");
+            return;
+        }
+        guint64 previous_generation = b->web_process_generation;
+        g_clear_error(&error);
+        gboolean changed = switch_profile(b, path, &error);
+        if (error) {
+            reply(r, NULL, error->message);
+            return;
+        }
+        g_autoptr(JsonObject) operation = json_object_new();
+        json_object_set_boolean_member(operation, "changed", changed);
+        json_object_set_string_member(operation, "profile_path", b->profile_path);
+        json_object_set_int_member(operation, "operation_id", b->reset_count);
+        json_object_set_int_member(operation, "target_generation",
+            changed ? previous_generation + 1 : previous_generation);
+        g_autoptr(JsonNode) node = json_node_new(JSON_NODE_OBJECT);
+        json_node_set_object(node, operation);
+        reply(r, node, NULL);
+        return;
+    }
+    if (g_str_equal(cmd, "wake")) {
+        if (b->engine_state == ENGINE_RESETTING || b->engine_state == ENGINE_RECOVERING) {
+            reply_engine_unavailable(r);
+            return;
+        }
+        gboolean changed = b->engine_state == ENGINE_SUSPENDED;
+        guint64 target = b->web_process_generation + (changed ? 1 : 0);
+        if (changed && !wake_engine(b, "about:blank")) {
+            reply(r, NULL, "Unable to wake WebKit");
+            return;
+        }
+        note_activity(b);
+        g_autoptr(JsonObject) operation = json_object_new();
+        json_object_set_boolean_member(operation, "changed", changed);
+        json_object_set_int_member(operation, "target_generation", target);
+        g_autoptr(JsonNode) node = json_node_new(JSON_NODE_OBJECT);
+        json_node_set_object(node, operation);
+        reply(r, node, NULL);
         return;
     }
     if (g_str_equal(cmd, "reset")) {
@@ -991,6 +1160,27 @@ static void dispatch(Request *r)
         reply(r, node, NULL);
         return;
     }
+    if (b->engine_state == ENGINE_SUSPENDED && g_str_equal(cmd, "open")) {
+        const char *uri = string_member(o, "uri");
+        if (!uri || !*uri || !wake_engine(b, uri)) {
+            reply(r, NULL, "uri must be an HTTP(S) URL, file URL, absolute path, or about:blank");
+            return;
+        }
+        reply(r, NULL, NULL);
+        return;
+    }
+    if (b->engine_state == ENGINE_SUSPENDED) {
+        if (!g_str_equal(cmd, "eval") && !g_str_equal(cmd, "back") &&
+            !g_str_equal(cmd, "forward") && !g_str_equal(cmd, "reload") &&
+            !g_str_equal(cmd, "stop")) {
+            reply(r, NULL, "Unknown command");
+            return;
+        }
+        wake_engine(b, "about:blank");
+        reply_full(r, NULL, "WebKit was sleeping and is waking; retry the page command",
+            "webkit_waking", TRUE);
+        return;
+    }
     if (b->engine_state != ENGINE_READY || !b->view) {
         reply_engine_unavailable(r);
         return;
@@ -1000,6 +1190,7 @@ static void dispatch(Request *r)
         if (!script) { reply(r, NULL, "script must be a JavaScript expression string"); return; }
         g_autofree char *body = g_strdup_printf("return await (\n%s\n);", script);
         r->page_bound = TRUE;
+        note_activity(b);
         b->page_requests = g_list_prepend(b->page_requests, r);
         webkit_web_view_call_async_javascript_function(b->view, body, -1, NULL,
             NULL, NULL, r->operation_cancel, javascript_done, r);
@@ -1016,6 +1207,7 @@ static void dispatch(Request *r)
     else if (g_str_equal(cmd, "reload")) webkit_web_view_reload(b->view);
     else if (g_str_equal(cmd, "stop")) webkit_web_view_stop_loading(b->view);
     else { reply(r, NULL, "Unknown command"); return; }
+    note_activity(b);
     reply(r, NULL, NULL);
 }
 
@@ -1072,6 +1264,86 @@ static gboolean private_directory(const char *path)
         return FALSE;
     }
     return TRUE;
+}
+
+static gboolean profile_directory(const char *path, gboolean allow_empty_chmod,
+                                   GError **error)
+{
+    struct stat st;
+    gboolean created = FALSE;
+    if (g_lstat(path, &st) != 0) {
+        if (errno != ENOENT) {
+            g_set_error(error, G_FILE_ERROR, g_file_error_from_errno(errno),
+                "Cannot inspect profile folder %s: %s", path, g_strerror(errno));
+            return FALSE;
+        }
+        if (g_mkdir_with_parents(path, 0700) != 0) {
+            g_set_error(error, G_FILE_ERROR, g_file_error_from_errno(errno),
+                "Cannot create profile folder %s: %s", path, g_strerror(errno));
+            return FALSE;
+        }
+        created = TRUE;
+        if (g_lstat(path, &st) != 0) {
+            g_set_error(error, G_FILE_ERROR, g_file_error_from_errno(errno),
+                "Cannot inspect profile folder %s: %s", path, g_strerror(errno));
+            return FALSE;
+        }
+    }
+    if (!S_ISDIR(st.st_mode) || st.st_uid != getuid()) {
+        g_set_error(error, G_FILE_ERROR, G_FILE_ERROR_ACCES,
+            "Profile folder must be a directory owned by you: %s", path);
+        return FALSE;
+    }
+    if (st.st_mode & 0077) {
+        gboolean empty = created;
+        if (!empty && allow_empty_chmod) {
+            g_autoptr(GError) directory_error = NULL;
+            GDir *directory = g_dir_open(path, 0, &directory_error);
+            empty = directory && g_dir_read_name(directory) == NULL;
+            if (directory) g_dir_close(directory);
+        }
+        if (!allow_empty_chmod || !empty || g_chmod(path, 0700) != 0) {
+            g_set_error(error, G_FILE_ERROR, G_FILE_ERROR_ACCES,
+                "Profile folder must have mode 0700. Create or select an empty folder: %s",
+                path);
+            return FALSE;
+        }
+    }
+    return TRUE;
+}
+
+static WebKitWebsiteDataManager *open_profile_manager(const char *path,
+    gboolean allow_empty_chmod, int *profile_fd, GError **error)
+{
+    *profile_fd = -1;
+    if (!profile_directory(path, allow_empty_chmod, error)) return NULL;
+    g_autofree char *lock = g_build_filename(path, ".lock", NULL);
+    int fd = open(lock, O_CREAT | O_RDWR | O_CLOEXEC | O_NOFOLLOW, 0600);
+    if (fd < 0) {
+        g_set_error(error, G_FILE_ERROR, g_file_error_from_errno(errno),
+            "Cannot open profile lock %s: %s", lock, g_strerror(errno));
+        return NULL;
+    }
+    if (flock(fd, LOCK_EX | LOCK_NB) != 0) {
+        int lock_error = errno;
+        if (lock_error == EWOULDBLOCK || lock_error == EAGAIN)
+            g_set_error(error, G_IO_ERROR, G_IO_ERROR_BUSY,
+                "Cannot lock profile (another browser may be using it): %s", path);
+        else
+            g_set_error(error, G_FILE_ERROR, g_file_error_from_errno(lock_error),
+                "Cannot lock profile %s: %s", path, g_strerror(lock_error));
+        close(fd);
+        return NULL;
+    }
+    g_autofree char *cache = g_build_filename(path, "cache", NULL);
+    WebKitWebsiteDataManager *manager = webkit_website_data_manager_new(
+        "base-data-directory", path, "base-cache-directory", cache, NULL);
+    g_autofree char *cookies = g_build_filename(path, "cookies.sqlite", NULL);
+    webkit_cookie_manager_set_persistent_storage(
+        webkit_website_data_manager_get_cookie_manager(manager), cookies,
+        WEBKIT_COOKIE_PERSISTENT_STORAGE_SQLITE);
+    *profile_fd = fd;
+    return manager;
 }
 
 static void set_application_icon(void)
@@ -1138,6 +1410,11 @@ static gboolean start_control(Browser *b)
 static void address_activate(GtkEntry *entry, gpointer data)
 {
     Browser *b = data;
+    if (b->engine_state == ENGINE_SUSPENDED) {
+        if (wake_engine(b, gtk_entry_get_text(entry)))
+            gtk_widget_grab_focus(GTK_WIDGET(b->view));
+        return;
+    }
     if (b->engine_state == ENGINE_READY && b->view &&
         navigate(b, gtk_entry_get_text(entry))) gtk_widget_grab_focus(GTK_WIDGET(b->view));
 }
@@ -1162,6 +1439,7 @@ static gboolean key_pressed(GtkWidget *widget, GdkEventKey *event, gpointer data
 {
     (void)widget;
     Browser *b = data;
+    note_activity(b);
     guint key = gdk_keyval_to_lower(event->keyval);
     if ((event->state & GDK_CONTROL_MASK) && key == GDK_KEY_l) {
         gtk_widget_grab_focus(b->entry);
@@ -1239,6 +1517,10 @@ static WebKitWebView *create_web_view(Browser *b)
     g_signal_connect(view, "load-failed", G_CALLBACK(load_failed), b);
     g_signal_connect(view, "web-process-terminated", G_CALLBACK(process_terminated), b);
     g_signal_connect(view, "decide-policy", G_CALLBACK(decide_policy), b);
+    g_signal_connect(view, "button-press-event", G_CALLBACK(note_view_input), b);
+    g_signal_connect(view, "scroll-event", G_CALLBACK(note_view_input), b);
+    g_signal_connect(view, "key-press-event", G_CALLBACK(note_view_input), b);
+    g_signal_connect(view, "touch-event", G_CALLBACK(note_view_input), b);
     gtk_box_pack_start(GTK_BOX(b->view_box), GTK_WIDGET(view), TRUE, TRUE, 0);
     gtk_widget_show(GTK_WIDGET(view));
     return view;
@@ -1258,11 +1540,8 @@ static void configure_memory_policy(Browser *b)
     webkit_website_data_manager_set_memory_pressure_settings(b->pressure);
 }
 
-static void hard_engine_reset(Browser *b)
+static void destroy_engine(Browser *b)
 {
-    b->engine_state = ENGINE_RECOVERING;
-    b->hard_reset_used = TRUE;
-    cancel_page_requests(b);
     if (b->view) {
         WebKitWebView *old_view = b->view;
         b->view = NULL;
@@ -1270,6 +1549,72 @@ static void hard_engine_reset(Browser *b)
         gtk_widget_destroy(GTK_WIDGET(old_view));
     }
     g_clear_object(&b->context);
+}
+
+static gboolean wake_engine(Browser *b, const char *input)
+{
+    if (b->engine_state != ENGINE_SUSPENDED) return FALSE;
+    g_autofree char *uri = normalize_uri(input);
+    if (!uri) return FALSE;
+    b->engine_state = ENGINE_RECOVERING;
+    b->hard_reset_used = TRUE;
+    b->context = create_web_context(b);
+    b->view = create_web_view(b);
+    if (!b->context || !b->view) {
+        set_recovery_failure(b, "Unable to wake WebKit.");
+        return FALSE;
+    }
+    note_activity(b);
+    arm_recovery_timeout(b);
+    webkit_web_view_load_uri(b->view, uri);
+    update_ui(b);
+    g_message("WebKit waking after idle hibernation");
+    return TRUE;
+}
+
+static gboolean hibernate_tick(gpointer data)
+{
+    Browser *b = data;
+    lease_active(b);
+    if (b->engine_state != ENGINE_READY || !b->view ||
+        webkit_web_view_is_loading(b->view) ||
+        webkit_web_view_is_playing_audio(b->view) ||
+        b->downloads_active || b->page_requests ||
+        g_get_monotonic_time() - b->last_activity_us <
+            (gint64)b->idle_hibernate_seconds * G_USEC_PER_SEC)
+        return G_SOURCE_CONTINUE;
+    b->engine_state = ENGINE_SUSPENDED;
+    b->web_process_generation++;
+    destroy_engine(b);
+#ifdef __GLIBC__
+    malloc_trim(0);
+#endif
+    gtk_widget_grab_focus(b->entry);
+    update_ui(b);
+    g_message("WebKit hibernated after %u seconds idle; generation=%" G_GUINT64_FORMAT,
+        b->idle_hibernate_seconds, b->web_process_generation);
+    return G_SOURCE_CONTINUE;
+}
+
+static void set_idle_hibernate(Browser *b, guint seconds)
+{
+    if (b->hibernate_timer) {
+        g_source_remove(b->hibernate_timer);
+        b->hibernate_timer = 0;
+    }
+    b->idle_hibernate_seconds = seconds;
+    note_activity(b);
+    if (seconds) b->hibernate_timer = g_timeout_add_seconds(1, hibernate_tick, b);
+    if (b->idle_hibernate_spin)
+        gtk_spin_button_set_value(GTK_SPIN_BUTTON(b->idle_hibernate_spin), seconds);
+}
+
+static void hard_engine_reset(Browser *b)
+{
+    b->engine_state = ENGINE_RECOVERING;
+    b->hard_reset_used = TRUE;
+    cancel_page_requests(b);
+    destroy_engine(b);
     b->context = create_web_context(b);
     b->view = create_web_view(b);
     if (!b->context || !b->view) {
@@ -1279,6 +1624,73 @@ static void hard_engine_reset(Browser *b)
     arm_recovery_timeout(b);
     webkit_web_view_load_uri(b->view, "about:blank");
     update_ui(b);
+}
+
+static void sync_profile_control(Browser *b)
+{
+    if (!b->profile_label) return;
+    const char *text = b->profile_path ? b->profile_path : "Private (ephemeral)";
+    gtk_label_set_text(GTK_LABEL(b->profile_label), text);
+    gtk_widget_set_tooltip_text(b->profile_label, text);
+}
+
+static gboolean switch_profile(Browser *b, const char *path, GError **error)
+{
+    if (b->engine_state == ENGINE_RESETTING || b->engine_state == ENGINE_RECOVERING) {
+        g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_BUSY,
+            "WebKit recovery is already in progress");
+        return FALSE;
+    }
+    if (b->downloads_active) {
+        g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_BUSY,
+            "Wait for the active download to finish before changing profiles");
+        return FALSE;
+    }
+    if (!path || !*path) {
+        g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT,
+            "Choose a profile folder");
+        return FALSE;
+    }
+
+    g_autofree char *absolute = g_canonicalize_filename(path, NULL);
+    if (b->profile_path && g_str_equal(b->profile_path, absolute)) return FALSE;
+
+    int new_fd = -1;
+    WebKitWebsiteDataManager *new_manager = open_profile_manager(
+        absolute, TRUE, &new_fd, error);
+    if (!new_manager) return FALSE;
+
+    cancel_page_requests(b);
+    b->recovery_burst_count = 0;
+    b->last_recovery_us = 0;
+    record_reset(b, "profile-change");
+    b->engine_state = ENGINE_RECOVERING;
+    b->hard_reset_used = TRUE;
+
+    WebKitWebsiteDataManager *old_manager = b->manager;
+    int old_fd = b->profile_fd;
+    destroy_engine(b);
+    b->manager = new_manager;
+    b->profile_fd = new_fd;
+    b->private_mode = FALSE;
+    g_free(b->profile_path);
+    b->profile_path = g_strdup(absolute);
+    sync_profile_control(b);
+    g_clear_object(&old_manager);
+    if (old_fd >= 0) close(old_fd);
+
+    b->context = create_web_context(b);
+    b->view = create_web_view(b);
+    if (!b->context || !b->view) {
+        set_recovery_failure(b, "Unable to recreate WebKit with the selected profile.");
+        return TRUE;
+    }
+    note_activity(b);
+    arm_recovery_timeout(b);
+    webkit_web_view_load_uri(b->view, "about:blank");
+    update_ui(b);
+    g_message("Profile changed to %s", b->profile_path);
+    return TRUE;
 }
 
 static gboolean switch_low_memory_mode(Browser *b, gboolean enabled)
@@ -1372,6 +1784,15 @@ static void memory_policy_apply_clicked(GtkButton *button, gpointer data)
     if (!switch_memory_policy(b, enabled, threshold)) sync_memory_controls(b);
 }
 
+static void idle_hibernate_apply_clicked(GtkButton *button, gpointer data)
+{
+    (void)button;
+    Browser *b = data;
+    gtk_spin_button_update(GTK_SPIN_BUTTON(b->idle_hibernate_spin));
+    set_idle_hibernate(b, (guint)gtk_spin_button_get_value_as_int(
+        GTK_SPIN_BUTTON(b->idle_hibernate_spin)));
+}
+
 static void reset_clicked(GtkButton *button, gpointer data)
 {
     (void)button;
@@ -1384,6 +1805,62 @@ static void close_dialog(GtkDialog *dialog, gint response, gpointer data)
 {
     (void)response; (void)data;
     gtk_widget_destroy(GTK_WIDGET(dialog));
+}
+
+static void profile_chooser_error(GtkWidget *chooser, const char *message)
+{
+    GtkWidget *label = g_object_get_data(G_OBJECT(chooser), "profile-error-label");
+    gtk_label_set_text(GTK_LABEL(label), message ? message : "");
+}
+
+static GtkWidget *create_profile_chooser(GtkWindow *parent, const char *current_folder,
+                                         const char *message)
+{
+    GtkWidget *chooser = gtk_file_chooser_dialog_new(
+        "Choose Lightview profile folder", parent,
+        GTK_FILE_CHOOSER_ACTION_SELECT_FOLDER,
+        "_Cancel", GTK_RESPONSE_CANCEL,
+        "_Select", GTK_RESPONSE_ACCEPT,
+        NULL);
+    gtk_window_set_modal(GTK_WINDOW(chooser), TRUE);
+    gtk_file_chooser_set_local_only(GTK_FILE_CHOOSER(chooser), TRUE);
+    gtk_file_chooser_set_create_folders(GTK_FILE_CHOOSER(chooser), TRUE);
+    if (current_folder)
+        gtk_file_chooser_set_current_folder(GTK_FILE_CHOOSER(chooser), current_folder);
+    GtkWidget *error_label = gtk_label_new(message ? message : "");
+    gtk_label_set_xalign(GTK_LABEL(error_label), 0);
+    gtk_label_set_line_wrap(GTK_LABEL(error_label), TRUE);
+    gtk_widget_set_size_request(error_label, 400, -1);
+    gtk_style_context_add_class(gtk_widget_get_style_context(error_label), "error");
+    gtk_file_chooser_set_extra_widget(GTK_FILE_CHOOSER(chooser), error_label);
+    g_object_set_data(G_OBJECT(chooser), "profile-error-label", error_label);
+    return chooser;
+}
+
+static void profile_chooser_response(GtkDialog *dialog, gint response, gpointer data)
+{
+    Browser *b = data;
+    if (response == GTK_RESPONSE_ACCEPT) {
+        g_autofree char *path = gtk_file_chooser_get_filename(GTK_FILE_CHOOSER(dialog));
+        g_autoptr(GError) error = NULL;
+        switch_profile(b, path, &error);
+        if (error) {
+            profile_chooser_error(GTK_WIDGET(dialog), error->message);
+            return;
+        }
+    }
+    gtk_widget_destroy(GTK_WIDGET(dialog));
+}
+
+static void profile_choose_clicked(GtkButton *button, gpointer data)
+{
+    (void)button;
+    Browser *b = data;
+    GtkWidget *chooser = create_profile_chooser(
+        b->version_dialog ? GTK_WINDOW(b->version_dialog) : GTK_WINDOW(b->window),
+        b->profile_path ? b->profile_path : g_get_user_data_dir(), NULL);
+    g_signal_connect(chooser, "response", G_CALLBACK(profile_chooser_response), b);
+    gtk_widget_show_all(chooser);
 }
 
 static void version_clicked(GtkButton *button, gpointer data)
@@ -1450,10 +1927,106 @@ static void version_clicked(GtkButton *button, gpointer data)
         G_CALLBACK(gtk_widget_destroyed), &b->memory_threshold_spin);
     g_signal_connect(b->memory_apply_button, "destroy",
         G_CALLBACK(gtk_widget_destroyed), &b->memory_apply_button);
+
+    GtkWidget *idle_grid = gtk_grid_new();
+    gtk_grid_set_column_spacing(GTK_GRID(idle_grid), 6);
+    gtk_grid_set_row_spacing(GTK_GRID(idle_grid), 6);
+    GtkWidget *idle_label = gtk_label_new("Hibernate after idle (seconds)");
+    gtk_label_set_xalign(GTK_LABEL(idle_label), 0);
+    GtkAdjustment *idle_adjustment = gtk_adjustment_new(
+        b->idle_hibernate_seconds, 0, MAX_IDLE_HIBERNATE_SECONDS, 60, 300, 0);
+    b->idle_hibernate_spin = gtk_spin_button_new(idle_adjustment, 1.0, 0);
+    gtk_spin_button_set_numeric(GTK_SPIN_BUTTON(b->idle_hibernate_spin), TRUE);
+    atk_object_set_name(gtk_widget_get_accessible(b->idle_hibernate_spin),
+        "Hibernate after idle (seconds)");
+    b->idle_hibernate_apply_button = gtk_button_new_with_label("Apply idle time");
+    GtkWidget *idle_note = gtk_label_new(
+        "0 disables automatic hibernation. Applying starts a new idle countdown.");
+    gtk_label_set_xalign(GTK_LABEL(idle_note), 0);
+    gtk_label_set_line_wrap(GTK_LABEL(idle_note), TRUE);
+    gtk_grid_attach(GTK_GRID(idle_grid), idle_label, 0, 0, 1, 1);
+    gtk_grid_attach(GTK_GRID(idle_grid), b->idle_hibernate_spin, 1, 0, 1, 1);
+    gtk_grid_attach(GTK_GRID(idle_grid), b->idle_hibernate_apply_button, 0, 1, 2, 1);
+    gtk_grid_attach(GTK_GRID(idle_grid), idle_note, 0, 2, 2, 1);
+    gtk_box_pack_start(GTK_BOX(gtk_message_dialog_get_message_area(
+        GTK_MESSAGE_DIALOG(b->version_dialog))), idle_grid, FALSE, FALSE, 6);
+    g_signal_connect(b->idle_hibernate_apply_button, "clicked",
+        G_CALLBACK(idle_hibernate_apply_clicked), b);
+    g_signal_connect(b->idle_hibernate_spin, "destroy",
+        G_CALLBACK(gtk_widget_destroyed), &b->idle_hibernate_spin);
+    g_signal_connect(b->idle_hibernate_apply_button, "destroy",
+        G_CALLBACK(gtk_widget_destroyed), &b->idle_hibernate_apply_button);
+
+    GtkWidget *profile_grid = gtk_grid_new();
+    gtk_grid_set_column_spacing(GTK_GRID(profile_grid), 6);
+    gtk_grid_set_row_spacing(GTK_GRID(profile_grid), 6);
+    GtkWidget *profile_title = gtk_label_new("Profile folder");
+    gtk_label_set_xalign(GTK_LABEL(profile_title), 0);
+    b->profile_label = gtk_label_new(NULL);
+    gtk_label_set_xalign(GTK_LABEL(b->profile_label), 0);
+    gtk_label_set_ellipsize(GTK_LABEL(b->profile_label), PANGO_ELLIPSIZE_MIDDLE);
+    gtk_label_set_max_width_chars(GTK_LABEL(b->profile_label), 48);
+    gtk_label_set_selectable(GTK_LABEL(b->profile_label), TRUE);
+    sync_profile_control(b);
+    b->profile_button = gtk_button_new_with_label("Choose profile folder…");
+    gtk_widget_set_tooltip_text(b->profile_button,
+        "Rebuild WebKit with another persistent profile while keeping the control connection");
+    gtk_grid_attach(GTK_GRID(profile_grid), profile_title, 0, 0, 1, 1);
+    gtk_grid_attach(GTK_GRID(profile_grid), b->profile_label, 1, 0, 1, 1);
+    gtk_grid_attach(GTK_GRID(profile_grid), b->profile_button, 0, 1, 2, 1);
+    gtk_box_pack_start(GTK_BOX(gtk_message_dialog_get_message_area(
+        GTK_MESSAGE_DIALOG(b->version_dialog))), profile_grid, FALSE, FALSE, 6);
+    g_signal_connect(b->profile_button, "clicked",
+        G_CALLBACK(profile_choose_clicked), b);
+    g_signal_connect(b->profile_label, "destroy",
+        G_CALLBACK(gtk_widget_destroyed), &b->profile_label);
+    g_signal_connect(b->profile_button, "destroy",
+        G_CALLBACK(gtk_widget_destroyed), &b->profile_button);
     g_signal_connect(b->version_dialog, "response", G_CALLBACK(close_dialog), NULL);
     g_signal_connect(b->version_dialog, "destroy", G_CALLBACK(gtk_widget_destroyed),
         &b->version_dialog);
     gtk_widget_show_all(b->version_dialog);
+    update_ui(b);
+}
+
+static gboolean open_startup_profile(Browser *b, const char *requested_path)
+{
+    g_autofree char *absolute = g_canonicalize_filename(requested_path, NULL);
+    g_autoptr(GError) error = NULL;
+    b->manager = open_profile_manager(absolute, FALSE, &b->profile_fd, &error);
+    if (!b->manager && !g_error_matches(error, G_IO_ERROR, G_IO_ERROR_BUSY)) {
+        g_printerr("%s\n", error->message);
+        return FALSE;
+    }
+    if (!b->manager) {
+        GtkWidget *chooser = create_profile_chooser(NULL, absolute, error->message);
+        gtk_widget_show_all(chooser);
+        while (!b->manager) {
+            if (gtk_dialog_run(GTK_DIALOG(chooser)) != GTK_RESPONSE_ACCEPT) {
+                gtk_widget_destroy(chooser);
+                g_printerr("Profile selection cancelled.\n");
+                return FALSE;
+            }
+            g_autofree char *selected = gtk_file_chooser_get_filename(
+                GTK_FILE_CHOOSER(chooser));
+            g_autofree char *selected_absolute = selected ?
+                g_canonicalize_filename(selected, NULL) : NULL;
+            g_clear_error(&error);
+            if (selected_absolute)
+                b->manager = open_profile_manager(selected_absolute, TRUE,
+                    &b->profile_fd, &error);
+            else
+                g_set_error_literal(&error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT,
+                    "Choose a profile folder");
+            if (b->manager) {
+                g_free(absolute);
+                absolute = g_steal_pointer(&selected_absolute);
+            } else profile_chooser_error(chooser, error->message);
+        }
+        gtk_widget_destroy(chooser);
+    }
+    b->profile_path = g_steal_pointer(&absolute);
+    return TRUE;
 }
 
 int main(int argc, char **argv)
@@ -1467,10 +2040,13 @@ int main(int argc, char **argv)
     if (!g_getenv("WEBKIT_DMABUF_RENDERER_FORCE_SHM"))
         g_setenv("WEBKIT_DMABUF_RENDERER_FORCE_SHM", "1", FALSE);
     Browser b = {0};
+    b.profile_fd = -1;
     b.engine_state = ENGINE_READY;
     b.web_process_generation = 1;
     gboolean no_control = FALSE, version = FALSE, disable_memory_kill = FALSE;
     gint memory_limit = 0, memory_kill_threshold = 0;
+    gint idle_hibernate = DEFAULT_IDLE_HIBERNATE_SECONDS;
+    gint lease_ttl = DEFAULT_LEASE_SECONDS;
     g_autofree char *profile = NULL;
     g_auto(GStrv) urls = NULL;
     GOptionEntry options[] = {
@@ -1482,6 +2058,8 @@ int main(int argc, char **argv)
         {"memory-limit", 0, 0, G_OPTION_ARG_INT, &memory_limit, "WebKit per-process memory-pressure limit in MiB", "MIB"},
         {"memory-kill-threshold", 0, 0, G_OPTION_ARG_INT, &memory_kill_threshold, "Terminate a WebKit process above this threshold", "MIB"},
         {"disable-memory-kill", 0, 0, G_OPTION_ARG_NONE, &disable_memory_kill, "Never terminate WebKit for exceeding the memory threshold", NULL},
+        {"idle-hibernate", 0, 0, G_OPTION_ARG_INT, &idle_hibernate, "Suspend WebKit after idle seconds (default 3600; 0 disables)", "SECONDS"},
+        {"lease-ttl", 0, 0, G_OPTION_ARG_INT, &lease_ttl, "Agent lease lifetime in seconds", "SECONDS"},
         {"low-memory", 0, 0, G_OPTION_ARG_NONE, &b.low_memory, "Reduce optional web features and use a 384 MiB limit", NULL},
         {"browser-cache", 0, 0, G_OPTION_ARG_NONE, &b.browser_cache, "Favor repeat-load speed over memory savings", NULL},
         {"version", 0, 0, G_OPTION_ARG_NONE, &version, "Show version", NULL},
@@ -1502,6 +2080,13 @@ int main(int argc, char **argv)
     if ((urls && g_strv_length(urls) > 1) || (profile && b.private_mode)) {
         g_printerr("Use one URL; --profile and --private are mutually exclusive.\n"); return 1;
     }
+    if (idle_hibernate < 0 || idle_hibernate > MAX_IDLE_HIBERNATE_SECONDS ||
+        lease_ttl < 1 || lease_ttl > 3600) {
+        g_printerr("--idle-hibernate must be 0–86400 seconds and --lease-ttl must be 1–3600 seconds.\n");
+        return 1;
+    }
+    b.idle_hibernate_seconds = (guint)idle_hibernate;
+    b.lease_seconds = (guint)lease_ttl;
     b.memory_limit_explicit = memory_limit != 0;
     if (memory_limit == 0) memory_limit = b.low_memory ? 384 : 768;
     if (memory_limit < 128 || memory_limit > 65536) {
@@ -1534,26 +2119,12 @@ int main(int argc, char **argv)
     set_application_icon();
     b.pressure = webkit_memory_pressure_settings_new();
     configure_memory_policy(&b);
-    int profile_fd = -1;
     if (b.private_mode) b.manager = webkit_website_data_manager_new_ephemeral();
     else {
-        if (!profile) profile = g_build_filename(g_get_user_data_dir(), "lightview", NULL);
-        g_autofree char *absolute = g_canonicalize_filename(profile, NULL);
-        if (!private_directory(absolute)) return 1;
-        g_autofree char *lock = g_build_filename(absolute, ".lock", NULL);
-        profile_fd = open(lock, O_CREAT | O_RDWR | O_CLOEXEC | O_NOFOLLOW, 0600);
-        if (profile_fd < 0 || flock(profile_fd, LOCK_EX | LOCK_NB) != 0) {
-            g_printerr("Cannot lock profile (another browser may be using it): %s\n", absolute);
-            if (profile_fd >= 0) close(profile_fd);
-            return 1;
-        }
-        g_autofree char *cache = g_build_filename(absolute, "cache", NULL);
-        b.manager = webkit_website_data_manager_new("base-data-directory", absolute,
-            "base-cache-directory", cache, NULL);
-        g_autofree char *cookies = g_build_filename(absolute, "cookies.sqlite", NULL);
-        webkit_cookie_manager_set_persistent_storage(
-            webkit_website_data_manager_get_cookie_manager(b.manager), cookies,
-            WEBKIT_COOKIE_PERSISTENT_STORAGE_SQLITE);
+        g_autofree char *default_profile = NULL;
+        if (!profile) default_profile = g_build_filename(g_get_user_data_dir(),
+            "lightview", NULL);
+        if (!open_startup_profile(&b, profile ? profile : default_profile)) return 1;
     }
     const char *disable_sandbox = g_getenv("WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS");
     b.sandbox_enabled = !(disable_sandbox && g_str_equal(disable_sandbox, "1"));
@@ -1639,9 +2210,11 @@ int main(int argc, char **argv)
     }
     sample_resource_usage(&b);
     b.resource_timer = g_timeout_add_seconds(2, sample_resource_usage, &b);
+    set_idle_hibernate(&b, b.idle_hibernate_seconds);
     gtk_widget_grab_focus(urls ? GTK_WIDGET(b.view) : b.entry);
     gtk_main();
     if (b.resource_timer) g_source_remove(b.resource_timer);
+    if (b.hibernate_timer) g_source_remove(b.hibernate_timer);
     if (b.flash_timeout) g_source_remove(b.flash_timeout);
     if (b.recovery_timeout) g_source_remove(b.recovery_timeout);
     if (b.service) {
@@ -1654,13 +2227,15 @@ int main(int argc, char **argv)
     g_clear_object(&b.settings);
     g_clear_object(&b.manager);
     webkit_memory_pressure_settings_free(b.pressure);
-    if (profile_fd >= 0) close(profile_fd);
+    if (b.profile_fd >= 0) close(b.profile_fd);
     g_free(b.socket_path);
+    g_free(b.profile_path);
     g_free(b.load_error);
     g_free(b.download_dir);
     g_free(b.download_message);
     g_free(b.last_committed_uri);
     g_free(b.last_termination_reason);
     g_free(b.last_reset_at);
+    g_free(b.lease_token);
     return 0;
 }

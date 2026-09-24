@@ -1,11 +1,13 @@
 """Exercise the real GTK/WebKit browser through its public control socket."""
 import contextlib
+import fcntl
 import http.server
 import importlib.machinery
 import importlib.util
 import json
 import os
 from pathlib import Path
+import shutil
 import socket
 import stat
 import subprocess
@@ -276,10 +278,38 @@ class BrowserIntegration(unittest.TestCase):
                 self.cli(path, "open", self.url, "--wait")
                 self.assertEqual(self.cli(path, "status")["running_mode"], "Normal")
                 self.cli(path, "eval", "(() => {localStorage.setItem('saved', 'yes'); document.cookie = 'saved=yes; Max-Age=3600; Path=/'; return true;})()")
-                collision = subprocess.run([str(ROOT / "build/lightview"), "--profile", profile, "--no-control"],
-                                           capture_output=True, text=True, timeout=10)
-                self.assertNotEqual(collision.returncode, 0)
-                self.assertIn("Cannot lock profile", collision.stderr)
+                with tempfile.TemporaryFile(mode="w+") as collision_log:
+                    collision = subprocess.Popen(
+                        [str(ROOT / "build/lightview"), "--profile", profile,
+                         "--no-control"], stdout=collision_log, stderr=collision_log)
+                    try:
+                        if shutil.which("xdotool"):
+                            deadline = time.monotonic() + 10
+                            while True:
+                                found = subprocess.run(
+                                    ["xdotool", "search", "--onlyvisible", "--pid", str(collision.pid),
+                                     "--name", "Choose Lightview profile folder"],
+                                    capture_output=True, text=True)
+                                if found.returncode == 0 and found.stdout.strip():
+                                    chooser_window = found.stdout.splitlines()[-1]
+                                    break
+                                self.assertIsNone(collision.poll(), "Startup exited instead of opening the folder chooser")
+                                self.assertLess(time.monotonic(), deadline,
+                                                "Startup profile chooser did not appear")
+                                time.sleep(0.1)
+                            subprocess.run(["xdotool", "windowfocus", chooser_window],
+                                           check=True)
+                            subprocess.run(["xdotool", "key", "Escape"], check=True)
+                            self.assertEqual(collision.wait(timeout=10), 1)
+                            collision_log.seek(0)
+                            self.assertIn("Profile selection cancelled", collision_log.read())
+                        else:
+                            time.sleep(1)
+                            self.assertIsNone(collision.poll(), "Startup exited instead of opening the folder chooser")
+                    finally:
+                        if collision.poll() is None:
+                            collision.terminate()
+                            collision.wait(timeout=5)
             with browser(directory, "--profile", profile) as (path, _):
                 self.cli(path, "open", self.url, "--wait")
                 self.assertEqual(self.cli(path, "eval", "localStorage.getItem('saved')"), "yes")
@@ -301,6 +331,121 @@ class BrowserIntegration(unittest.TestCase):
                 self.cli(path, "open", self.url, "--wait")
                 self.assertIsNone(self.cli(path, "eval", "localStorage.getItem('saved')"))
                 self.assertEqual(self.cli(path, "eval", "document.cookie"), "")
+
+    def test_runtime_profile_switch_keeps_process_socket_and_lease(self):
+        with tempfile.TemporaryDirectory(prefix="lightview-test-") as directory:
+            first_profile = str(Path(directory) / "first-profile")
+            second_profile = str(Path(directory) / "second-profile")
+            with browser(directory, "--private") as (path, process):
+                initial = self.cli(path, "status")
+                self.assertIsNone(initial["profile_path"])
+                socket_inode = os.stat(path).st_ino
+                token = self.cli(path, "lease", "acquire")["token"]
+
+                switched = self.cli(path, "--lease", token,
+                                    "profile", first_profile)
+                self.assertTrue(switched["changed"])
+                self.assertEqual(switched["profile_path"], first_profile)
+                state = self.cli(path, "status")
+                self.assertEqual(state["profile_path"], first_profile)
+                self.assertFalse(state["private"])
+                self.assertTrue(state["lease_active"])
+                self.assertEqual(state["pid"], process.pid)
+                self.assertEqual(os.stat(path).st_ino, socket_inode)
+                self.assertEqual(stat.S_IMODE(os.stat(first_profile).st_mode), 0o700)
+
+                self.cli(path, "--lease", token, "open", self.url, "--wait")
+                self.cli(path, "--lease", token, "eval",
+                         "localStorage.setItem('profile-value', 'first')")
+                locked_profile = Path(directory) / "locked-profile"
+                locked_profile.mkdir(mode=0o700)
+                with (locked_profile / ".lock").open("w") as lock:
+                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    before_failure = self.cli(path, "status")
+                    failure = self.cli(path, "--lease", token,
+                                       "profile", str(locked_profile), success=False)
+                    self.assertIn("Cannot lock profile", failure)
+                    after_failure = self.cli(path, "status")
+                    self.assertEqual(after_failure["profile_path"], first_profile)
+                    self.assertEqual(after_failure["web_process_generation"],
+                                     before_failure["web_process_generation"])
+                    self.assertEqual(self.cli(path, "--lease", token, "eval",
+                                              "localStorage.getItem('profile-value')"),
+                                     "first")
+                self.cli(path, "--lease", token, "profile", second_profile)
+                self.cli(path, "--lease", token, "open", self.url, "--wait")
+                self.assertIsNone(self.cli(path, "--lease", token, "eval",
+                                           "localStorage.getItem('profile-value')"))
+                self.cli(path, "--lease", token, "eval",
+                         "localStorage.setItem('profile-value', 'second')")
+
+                self.cli(path, "--lease", token, "profile", first_profile)
+                self.cli(path, "--lease", token, "open", self.url, "--wait")
+                self.assertEqual(self.cli(path, "--lease", token, "eval",
+                                          "localStorage.getItem('profile-value')"),
+                                 "first")
+                unchanged = self.cli(path, "--lease", token,
+                                     "profile", first_profile)
+                self.assertFalse(unchanged["changed"])
+                details = self.cli(path, "version", "--show")
+                self.assertIn("lightview", details)
+                state = self.cli(path, "status")
+                self.assertTrue(state["profile_button_visible"])
+                self.assertEqual(state["profile_control_path"], first_profile)
+                self.assertEqual(state["pid"], process.pid)
+                self.assertEqual(os.stat(path).st_ino, socket_inode)
+                self.cli(path, "--lease", token, "lease", "renew")
+                self.cli(path, "--lease", token, "lease", "release")
+
+    def test_startup_locked_profile_can_choose_another_folder(self):
+        if not shutil.which("xdotool"):
+            self.skipTest("xdotool is required to exercise the GTK folder chooser")
+        with tempfile.TemporaryDirectory(prefix="lightview-test-") as directory:
+            locked_profile = Path(directory) / "locked-profile"
+            locked_profile.mkdir(mode=0o700)
+            new_profile = Path(directory) / "new-profile"
+            new_profile.mkdir(mode=0o700)
+            control = str(Path(directory) / "startup-control.sock")
+            with (locked_profile / ".lock").open("w") as lock:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                with tempfile.TemporaryFile(mode="w+") as log:
+                    process = subprocess.Popen(
+                        [str(ROOT / "build/lightview"), "--profile", str(locked_profile),
+                         "--socket", control], stdout=log, stderr=log)
+                    try:
+                        deadline = time.monotonic() + 10
+                        while True:
+                            found = subprocess.run(
+                                ["xdotool", "search", "--onlyvisible", "--pid",
+                                 str(process.pid), "--name", "Choose Lightview profile folder"],
+                                capture_output=True, text=True)
+                            if found.returncode == 0 and found.stdout.strip():
+                                chooser_window = found.stdout.splitlines()[-1]
+                                break
+                            self.assertIsNone(process.poll(), "Browser exited before folder selection")
+                            self.assertLess(time.monotonic(), deadline, "Folder chooser did not appear")
+                            time.sleep(0.1)
+                        subprocess.run(["xdotool", "windowfocus", chooser_window], check=True)
+                        subprocess.run(["xdotool", "key", "ctrl+l"], check=True)
+                        subprocess.run(["xdotool", "type", "--clearmodifiers", str(new_profile)],
+                                       check=True)
+                        subprocess.run(["xdotool", "key", "Return"], check=True)
+                        subprocess.run(["xdotool", "key", "Return"], check=True)
+                        while not Path(control).exists():
+                            self.assertIsNone(process.poll(), "Browser exited after folder selection")
+                            self.assertLess(time.monotonic(), deadline, "Browser did not start")
+                            time.sleep(0.1)
+                        state = ctl.request(control, "status", timeout=5)
+                        self.assertEqual(state["profile_path"], str(new_profile))
+                        self.assertEqual(state["pid"], process.pid)
+                        self.assertEqual(state["engine_state"], "ready")
+                    finally:
+                        if process.poll() is None:
+                            try:
+                                ctl.request(control, "quit", timeout=2)
+                            except (OSError, RuntimeError):
+                                process.terminate()
+                            process.wait(timeout=5)
 
     def test_startup_validation_and_load_errors(self):
         with tempfile.TemporaryDirectory(prefix="lightview-test-") as directory:
@@ -336,6 +481,7 @@ class BrowserIntegration(unittest.TestCase):
                 self.assertTrue(state["low_memory"])
                 self.assertEqual(state["memory_limit_mib"], 384)
                 self.assertEqual(state["memory_kill_threshold_mib"], 3072)
+                self.assertEqual(state["idle_hibernate_seconds"], 3600)
                 self.assertTrue(state["memory_protection_enabled"])
                 self.assertEqual(state["configured_memory_kill_threshold_mib"], 3072)
                 self.assertEqual(state["running_mode"], "Private / Low memory")
@@ -376,6 +522,15 @@ class BrowserIntegration(unittest.TestCase):
                 self.assertTrue(state["memory_protection_toggle_visible"])
                 self.assertTrue(state["memory_protection_toggle_active"])
                 self.assertEqual(state["memory_threshold_control_mib"], 3072)
+                self.assertTrue(state["idle_hibernate_control_visible"])
+                self.assertEqual(state["idle_hibernate_control_seconds"], 3600)
+                self.cli(path, "hibernate-after", "120")
+                state = self.cli(path, "status")
+                self.assertEqual(state["idle_hibernate_seconds"], 120)
+                self.assertEqual(state["idle_hibernate_control_seconds"], 120)
+                self.cli(path, "hibernate-after", "3600")
+                self.assertTrue(state["profile_button_visible"])
+                self.assertEqual(state["profile_control_path"], "Private (ephemeral)")
                 self.assertEqual(state["uri"], before["uri"])
                 self.assertEqual(state["engine_state"], "ready")
                 self.assertEqual(state["web_process_generation"], 1)
@@ -421,6 +576,110 @@ class BrowserIntegration(unittest.TestCase):
                 self.assertTrue(state["memory_protection_enabled"])
                 self.assertTrue(state["memory_protection_toggle_active"])
                 self.assertEqual(state["memory_kill_threshold_mib"], 4096)
+
+    def test_version_idle_control_applies_without_rebuilding_webkit(self):
+        try:
+            import gi
+            gi.require_version("Atspi", "2.0")
+            from gi.repository import Atspi
+        except (ImportError, ValueError):
+            self.skipTest("Python AT-SPI bindings are required for the GTK control test")
+
+        with tempfile.TemporaryDirectory(prefix="lightview-test-") as directory:
+            with browser(directory, "--private") as (path, process):
+                self.cli(path, "version", "--show")
+
+                def find_named(node, name):
+                    if node.get_name() == name:
+                        return node
+                    for index in range(node.get_child_count()):
+                        found = find_named(node.get_child_at_index(index), name)
+                        if found:
+                            return found
+                    return None
+
+                desktop = Atspi.get_desktop(0)
+                app = next(desktop.get_child_at_index(index)
+                           for index in range(desktop.get_child_count())
+                           if desktop.get_child_at_index(index).get_name() == "lightview")
+                spin = find_named(app, "Hibernate after idle (seconds)")
+                apply_button = find_named(app, "Apply idle time")
+                self.assertIsNotNone(spin)
+                self.assertIsNotNone(apply_button)
+                self.assertEqual(spin.get_value_iface().get_current_value(), 3600)
+                generation = self.cli(path, "status")["web_process_generation"]
+                self.assertTrue(spin.get_value_iface().set_current_value(120))
+                self.assertTrue(apply_button.get_action_iface().do_action(0))
+                state = self.cli(path, "status")
+                self.assertEqual(state["idle_hibernate_seconds"], 120)
+                self.assertEqual(state["pid"], process.pid)
+                self.assertEqual(state["web_process_generation"], generation)
+                self.cli(path, "hibernate-after", "0")
+                self.assertEqual(spin.get_value_iface().get_current_value(), 0)
+
+    def test_idle_hibernation_keeps_agent_lease_and_socket(self):
+        with tempfile.TemporaryDirectory(prefix="lightview-test-") as directory:
+            with browser(directory, "--private", "--low-memory",
+                         "--idle-hibernate", "2", "--lease-ttl", "30") as (path, process):
+                socket_inode = os.stat(path).st_ino
+                reserved = self.cli(path, "lease", "acquire")
+                token = reserved["token"]
+                self.assertTrue(reserved["active"])
+                self.assertIn("reserved", self.cli(path, "lease", "acquire", success=False))
+                deadline = time.monotonic() + 10
+                while (state := self.cli(path, "status"))["engine_state"] != "suspended":
+                    self.assertLess(time.monotonic(), deadline, state)
+                    time.sleep(0.2)
+                self.assertTrue(state["lease_active"])
+                self.assertEqual(state["pid"], process.pid)
+                self.assertEqual(os.stat(path).st_ino, socket_inode)
+                self.assertIn("reserved", self.cli(path, "open", self.url, success=False))
+                self.cli(path, "--lease", token, "lease", "renew")
+                self.assertEqual(self.cli(path, "status")["engine_state"], "suspended")
+                self.cli(path, "--lease", token, "open", self.url, "--wait")
+                self.assertIn("reserved", self.cli(path, "eval", "document.title",
+                                                    success=False))
+                self.assertEqual(self.cli(path, "--lease", token, "eval", "document.title"),
+                                 "Lightview test")
+                self.assertEqual(self.cli(path, "status")["engine_state"], "ready")
+                self.cli(path, "--lease", token, "eval",
+                         "localStorage.setItem('hibernation-test', 'retained')")
+                deadline = time.monotonic() + 10
+                while self.cli(path, "status")["engine_state"] != "suspended":
+                    self.assertLess(time.monotonic(), deadline)
+                    time.sleep(0.2)
+                self.cli(path, "--lease", token, "open", self.url, "--wait")
+                self.assertEqual(self.cli(path, "--lease", token, "eval",
+                                          "localStorage.getItem('hibernation-test')"),
+                                 "retained")
+                self.cli(path, "--lease", token, "lease", "release")
+                self.assertFalse(self.cli(path, "status")["lease_active"])
+                self.assertEqual(self.cli(path, "hibernate-after", "0"),
+                                 {"idle_hibernate_seconds": 0})
+                time.sleep(2.5)
+                self.assertEqual(self.cli(path, "status")["engine_state"], "ready")
+                self.assertEqual(self.cli(path, "hibernate-after", "2"),
+                                 {"idle_hibernate_seconds": 2})
+                deadline = time.monotonic() + 10
+                while self.cli(path, "status")["engine_state"] != "suspended":
+                    self.assertLess(time.monotonic(), deadline)
+                    time.sleep(0.2)
+                self.assertEqual(self.cli(path, "hibernate-after", "3600"),
+                                 {"idle_hibernate_seconds": 3600})
+                self.assertEqual(self.cli(path, "status")["engine_state"], "suspended")
+
+    def test_agent_lease_expires(self):
+        with tempfile.TemporaryDirectory(prefix="lightview-test-") as directory:
+            with browser(directory, "--private", "--lease-ttl", "1") as (path, _):
+                first = self.cli(path, "lease", "acquire")["token"]
+                time.sleep(1.2)
+                self.assertIn("expired", self.cli(path, "--lease", first,
+                                                   "open", self.url, success=False))
+                second = self.cli(path, "lease", "acquire")["token"]
+                self.assertNotEqual(first, second)
+                self.assertIn("valid lease", self.cli(path, "--lease", first,
+                                                       "lease", "release", success=False))
+                self.cli(path, "--lease", second, "lease", "release")
 
     def test_downloads_save_automatically(self):
         with tempfile.TemporaryDirectory(prefix="lightview-test-") as directory:
