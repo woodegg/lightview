@@ -39,6 +39,39 @@ The default prefix is `/usr/local`; `PREFIX` and `DESTDIR` are supported. The
 launcher does not change your default browser. Builds and installation need the
 distribution's development libraries; fetching packages requires network access.
 
+### Nested-container WebKit sandbox launcher
+
+Some unprivileged LXC/Incus containers place private overlays below `/proc`,
+such as `/proc/sys/kernel/random/boot_id` or lxcfs resource files. Linux then
+rejects the new procfs mount made by WebKitGTK's bubblewrap sandbox even though
+ordinary user and PID namespace creation succeeds. Lightview reports the
+failure as `bwrap: Can't mount proc on /newroot/proc: Operation not permitted`.
+
+Lightview includes an optional launcher for this specific environment. Build as
+the normal user, then explicitly install the browser and launcher under the
+required default `/usr/local` prefix as root:
+
+```sh
+make
+sudo make install-sandbox-launcher
+/usr/local/libexec/lightview-sandbox-launcher https://example.org
+```
+
+The launcher creates a private mount namespace, prevents mount propagation,
+detaches mounts below `/proc` only in that private namespace, and then
+irreversibly returns to the calling UID and GID before it executes Lightview.
+The fixed Lightview executable must be root-owned, executable, and not writable
+by its group or other users. The launcher enables `no_new_privs`; Lightview and
+all of its normal automation, profile, memory, and hibernation options follow
+the launcher command unchanged.
+
+`make install` installs the launcher as an ordinary `0755` executable, so it
+cannot perform the privileged namespace setup. Only the explicit target above
+sets owner `root:root` and mode `4755`. Use Lightview directly on hosts where
+WebKit's sandbox already starts. Do not make a shell script setuid, grant
+Lightview `CAP_SYS_ADMIN`, make the whole container privileged, or disable the
+WebKit sandbox as a production workaround.
+
 Keyboard shortcuts: Ctrl+L focuses the address, Ctrl+R or F5 reloads, Alt+Left /
 Alt+Right navigate history, Escape stops loading, and Ctrl+Q quits. The toolbar
 also provides **Reset WebKit** and version-information buttons. Enter a URL or an
@@ -345,9 +378,17 @@ profile locking, and socket lifecycle. It does not require
 external sites, credentials, or login tokens. It does require a working display
 backend and a host that permits WebKit's process sandbox.
 
-This development container rejects bubblewrap's proc mount, so the normal
-sandboxed test invocation cannot launch WebKit here. For **local fixture tests
-only**, the suite can be run with a process-scoped WebKit override:
+After explicitly installing the nested-container launcher, run the same suite
+through that path without disabling WebKit's sandbox:
+
+```sh
+LIGHTVIEW_TEST_BROWSER=/usr/local/libexec/lightview-sandbox-launcher make check
+```
+
+If the optional nested-container launcher has not been installed, this
+development container rejects bubblewrap's proc mount and the normal sandboxed
+test invocation cannot launch WebKit. For **local fixture tests only**, the
+suite can be run with a process-scoped WebKit override:
 
 ```sh
 WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS=1 \

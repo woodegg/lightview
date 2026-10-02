@@ -4,8 +4,8 @@ This document records accepted requirements for the next Lightview release.
 Items remain requirements until implementation, validation, and release work
 are completed.
 
-Release status: completed and released as 0.1.10 on 2026-09-24. The final scope
-adds LTV-014 and LTV-015 to the requirements released in 0.1.8 and 0.1.9.
+Release status: completed and released as 0.1.11 on 2026-10-02. The final scope
+adds LTV-016 to the requirements released in 0.1.8 through 0.1.10.
 
 ## LTV-008 — Version information button
 
@@ -312,3 +312,40 @@ Acceptance:
   that a lock failure leaves the current generation and storage intact.
 - A real GTK chooser test starts with a locked profile, selects another folder,
   and reaches a ready browser using the selected profile.
+
+## LTV-016 — Nested-container WebKit sandbox launcher
+
+Status: released in 0.1.11.
+
+Allow Lightview to retain WebKitGTK's bubblewrap sandbox inside unprivileged
+LXC/Incus environments where container-specific submounts below `/proc` make a
+nested, unprivileged procfs mount fail with `EPERM`.
+
+Requirements:
+
+- Keep ordinary desktop launches and installations unchanged.
+- Provide a separate launcher that must be explicitly installed setuid root.
+- Open a fixed Lightview executable before namespace setup and require it to be
+  root-owned, executable, and not writable by its group or other users.
+- Create a private mount namespace and prevent mount propagation before
+  detaching any `/proc` submount.
+- Detach only mounts strictly below `/proc`; never replace or unmount the
+  container's own `/proc` mount.
+- Drop the saved, effective, and real user and group IDs back to the caller,
+  clear ambient capabilities, and enable `no_new_privs` before executing
+  Lightview.
+- Preserve Lightview command-line options, desktop environment, profile,
+  control socket, and process supervision behavior.
+- Do not disable WebKit's sandbox, grant capabilities to Lightview, or require
+  a privileged container.
+
+Acceptance:
+
+- Without the launcher, reproduce bubblewrap's procfs `EPERM` in the affected
+  unprivileged container.
+- With the launcher, the same bubblewrap sandbox probe succeeds while running
+  as the original unprivileged UID with zero effective capabilities.
+- Verify that `/proc` submounts remain present in the container's original
+  mount namespace after the launched process exits.
+- Run the complete GTK/WebKit integration suite and verify the existing direct
+  launch path remains unchanged.

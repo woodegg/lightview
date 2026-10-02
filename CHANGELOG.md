@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.1.11 - 2026-10-02
+
+### Added
+
+- Add an optional, narrowly scoped setuid launcher for unprivileged LXC/Incus
+  containers where WebKit's bubblewrap sandbox cannot mount a fresh procfs over
+  container-specific `/proc` submounts.
+- Create a private mount namespace, detach only mounts below `/proc`, drop all
+  user and group privilege, enable `no_new_privs`, and then execute a fixed,
+  root-owned Lightview binary. The container's mount namespace is unchanged.
+- Add an explicit `install-sandbox-launcher` target. Normal builds and installs
+  leave the launcher non-setuid and continue to start Lightview directly.
+
 ## 0.1.10 - 2026-09-24
 
 ### Added

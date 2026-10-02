@@ -17,6 +17,7 @@ import time
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
+BROWSER = Path(os.environ.get("LIGHTVIEW_TEST_BROWSER", ROOT / "build/lightview"))
 loader = importlib.machinery.SourceFileLoader("lightviewctl", str(ROOT / "tools/lightviewctl"))
 spec = importlib.util.spec_from_loader(loader.name, loader)
 ctl = importlib.util.module_from_spec(spec)
@@ -64,7 +65,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
 def browser(directory, *options):
     path = str(Path(directory) / "control.sock")
     with tempfile.TemporaryFile(mode="w+") as log:
-        process = subprocess.Popen([str(ROOT / "build/lightview"), "--socket", path, *options],
+        process = subprocess.Popen([str(BROWSER), "--socket", path, *options],
                                    stdout=log, stderr=log)
         try:
             deadline = time.monotonic() + 20
@@ -80,6 +81,19 @@ def browser(directory, *options):
                         log.seek(0)
                         raise RuntimeError(f"Browser did not start:\n{log.read()}")
                     time.sleep(0.1)
+            if os.environ.get("LIGHTVIEW_TEST_BROWSER"):
+                fields = {}
+                for line in Path(f"/proc/{process.pid}/status").read_text().splitlines():
+                    if ":" in line:
+                        key, value = line.split(":", 1)
+                        fields[key] = value.strip()
+                expected_uid = str(os.getuid())
+                if fields.get("Uid", "").split() != [expected_uid] * 4:
+                    raise AssertionError(f"launcher did not restore caller UID: {fields.get('Uid')}")
+                if fields.get("CapEff") != "0000000000000000":
+                    raise AssertionError(f"launcher retained capabilities: {fields.get('CapEff')}")
+                if fields.get("NoNewPrivs") != "1":
+                    raise AssertionError("launcher did not enable no_new_privs")
             yield path, process
         finally:
             if process.poll() is None:
@@ -206,7 +220,7 @@ class BrowserIntegration(unittest.TestCase):
                     stalled.connect(path)
                     stalled.sendall(b'{"command":')
                     self.assertEqual(ctl.request(path, "status")["pid"], process.pid)
-                collision = subprocess.run([str(ROOT / "build/lightview"), "--private", "--socket", path],
+                collision = subprocess.run([str(BROWSER), "--private", "--socket", path],
                                            capture_output=True, text=True, timeout=10)
                 self.assertNotEqual(collision.returncode, 0)
                 self.assertEqual(ctl.request(path, "status")["pid"], process.pid)
@@ -280,7 +294,7 @@ class BrowserIntegration(unittest.TestCase):
                 self.cli(path, "eval", "(() => {localStorage.setItem('saved', 'yes'); document.cookie = 'saved=yes; Max-Age=3600; Path=/'; return true;})()")
                 with tempfile.TemporaryFile(mode="w+") as collision_log:
                     collision = subprocess.Popen(
-                        [str(ROOT / "build/lightview"), "--profile", profile,
+                        [str(BROWSER), "--profile", profile,
                          "--no-control"], stdout=collision_log, stderr=collision_log)
                     try:
                         if shutil.which("xdotool"):
@@ -410,7 +424,7 @@ class BrowserIntegration(unittest.TestCase):
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 with tempfile.TemporaryFile(mode="w+") as log:
                     process = subprocess.Popen(
-                        [str(ROOT / "build/lightview"), "--profile", str(locked_profile),
+                        [str(BROWSER), "--profile", str(locked_profile),
                          "--socket", control], stdout=log, stderr=log)
                     try:
                         deadline = time.monotonic() + 10
@@ -435,7 +449,14 @@ class BrowserIntegration(unittest.TestCase):
                             self.assertIsNone(process.poll(), "Browser exited after folder selection")
                             self.assertLess(time.monotonic(), deadline, "Browser did not start")
                             time.sleep(0.1)
-                        state = ctl.request(control, "status", timeout=5)
+                        while True:
+                            try:
+                                state = ctl.request(control, "status", timeout=2)
+                                break
+                            except (OSError, RuntimeError):
+                                self.assertIsNone(process.poll(), "Browser exited during startup")
+                                self.assertLess(time.monotonic(), deadline, "Browser control did not become ready")
+                                time.sleep(0.1)
                         self.assertEqual(state["profile_path"], str(new_profile))
                         self.assertEqual(state["pid"], process.pid)
                         self.assertEqual(state["engine_state"], "ready")
@@ -450,13 +471,13 @@ class BrowserIntegration(unittest.TestCase):
     def test_startup_validation_and_load_errors(self):
         with tempfile.TemporaryDirectory(prefix="lightview-test-") as directory:
             too_long = str(Path(directory) / ("a" * 110))
-            invalid = subprocess.run([str(ROOT / "build/lightview"), "--private", "--socket", too_long],
+            invalid = subprocess.run([str(BROWSER), "--private", "--socket", too_long],
                                      capture_output=True, text=True, timeout=10)
             self.assertNotEqual(invalid.returncode, 0)
             self.assertIn("path is too long", invalid.stderr)
             self.assertEqual(list(Path(directory).iterdir()), [])
             invalid_policy = subprocess.run(
-                [str(ROOT / "build/lightview"), "--private",
+                [str(BROWSER), "--private",
                  "--memory-kill-threshold", "256", "--no-control"],
                 capture_output=True, text=True, timeout=10)
             self.assertNotEqual(invalid_policy.returncode, 0)
@@ -506,7 +527,7 @@ class BrowserIntegration(unittest.TestCase):
 
     def test_version_sources_match(self):
         command_line = subprocess.check_output(
-            [str(ROOT / "build/lightview"), "--version"], text=True).strip()
+            [str(BROWSER), "--version"], text=True).strip()
         with tempfile.TemporaryDirectory(prefix="lightview-test-") as directory:
             with browser(directory, "--private") as (path, process):
                 before = self.cli(path, "status")
