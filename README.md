@@ -412,3 +412,7 @@ windows, or permission prompts for camera/microphone/location. Website requests
 that need unimplemented permission UI retain WebKit's default behavior. Major
 site login, video codecs, DRM, accessibility, and long-session memory behavior
 need a separate compatibility pass on the target desktop.
+
+## License
+
+Lightview is available under the [MIT License](LICENSE).
