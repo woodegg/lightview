@@ -5,7 +5,8 @@ PKGS = webkit2gtk-4.1 json-glib-1.0 gio-unix-2.0
 ICON_SIZES = 16 24 32 48 64 128 256
 CPPFLAGS += $(shell $(PKG_CONFIG) --cflags $(PKGS))
 CFLAGS ?= -Os -g
-CFLAGS += -std=c11 -Wall -Wextra -Wpedantic -Wformat=2
+CFLAGS += -std=c11 -Wall -Wextra -Wpedantic -Wformat=2 \
+	-ffile-prefix-map=$(CURDIR)=. -fdebug-prefix-map=$(CURDIR)=.
 LDLIBS += $(shell $(PKG_CONFIG) --libs $(PKGS))
 
 .PHONY: all check-deps check install install-sandbox-launcher clean
