@@ -29,7 +29,7 @@
  void Connection::SyncMessageState::dispatchMessagesAndResetDidScheduleDispatchMessagesForConnection(Connection& connection)
  {
      assertIsCurrent(m_dispatcher.get());
-@@ -526,6 +541,8 @@
+@@ -526,5 +541,7 @@
      }
      {
          Locker locker { m_incomingMessagesLock };
@@ -37,4 +37,3 @@
 +            m_syncState->removeConnection(*this);
          m_syncState = nullptr;
      }
- 
