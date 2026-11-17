@@ -8,6 +8,7 @@ import importlib.util
 import io
 import json
 import os
+import re
 import signal
 from pathlib import Path
 import shutil
@@ -53,7 +54,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
     rebuild_requests = 0
 
     def do_GET(self):
-        if self.path == "/media.mp4":
+        if self.path == "/resource-trace-page":
+            payload = (b'<!doctype html><title>Resource trace fixture</title>' +
+                       b''.join(f'<img src="/trace-private-path/{i}.svg?trace-private-query=sentinel">'.encode()
+                                for i in range(270)))
+            content_type = "text/html; charset=utf-8"
+        elif self.path.startswith("/trace-private-path/"):
+            payload = b'<svg xmlns="http://www.w3.org/2000/svg" width="8" height="6"></svg>'
+            content_type = "image/svg+xml"
+        elif self.path == "/media.mp4":
             payload = (ROOT / "tests/fixtures/media.mp4").read_bytes()
             content_type = "video/mp4"
         elif self.path == "/api":
@@ -153,7 +162,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
 
 @contextlib.contextmanager
-def browser(directory, *options, allow_main_exit=False):
+def browser(directory, *options, allow_main_exit=False, capture_output=None):
     path = str(Path(directory) / "control.sock")
     with tempfile.TemporaryFile(mode="w+") as log:
         process = subprocess.Popen([str(BROWSER), "--socket", path, *options],
@@ -201,6 +210,8 @@ def browser(directory, *options, allow_main_exit=False):
                         process.wait()
             log.seek(0)
             output = log.read()
+            if capture_output is not None:
+                capture_output.append(output)
             if (exited_before_cleanup or process.returncode) and not allow_main_exit:
                 raise AssertionError(
                     f"Browser main process exited unexpectedly ({process.returncode}):\n{output}")
@@ -232,6 +243,65 @@ class BrowserIntegration(unittest.TestCase):
                                 capture_output=True, text=True, timeout=15)
         self.assertEqual(result.returncode == 0, success, result.stderr)
         return json.loads(result.stdout) if success else result.stderr
+
+    def test_resource_trace_exceeds_timing_buffer_without_url_secrets(self):
+        logs = []
+        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(os.environ, {
+                "LIGHTVIEW_TRACE_RESOURCES": "1", "LIGHTVIEW_TRACE_NAVIGATION": "0"}):
+            with browser(directory, "--private", capture_output=logs) as (path, _):
+                self.cli(path, "open", self.url + "/resource-trace-page", "--wait")
+                deadline = time.monotonic() + 30
+                while not ctl.request(path, "eval", script=(
+                        "document.images.length===270 && [...document.images].every("
+                        "image=>image.complete && image.naturalWidth===8)")):
+                    self.assertLess(time.monotonic(), deadline, "Fixture images did not load")
+                    time.sleep(0.1)
+                self.assertEqual(ctl.request(path, "eval", script=(
+                    "performance.getEntriesByType('resource').length")), 250)
+        lines = [line for line in logs[0].splitlines() if "Resource trace:" in line]
+        events = [dict(re.findall(r"([\w-]+)=([^ ]+)", line)) for line in lines]
+        finished = {event["id"] for event in events
+                    if event["phase"] == "finished" and event["failed"] == "0"}
+        self.assertGreaterEqual(len(finished), 271)
+        started = {event["id"] for event in events if event["phase"] == "started"}
+        self.assertTrue(finished <= started)
+        self.assertTrue(any(event["main"] == "0" and event["phase"] == "response"
+                            and event["status"] == "200" for event in events))
+        for secret in ("trace-private-path", "trace-private-query", "sentinel"):
+            self.assertNotIn(secret, "\n".join(lines))
+        self.assertNotIn("Navigation trace:", logs[0])
+
+    def test_resource_trace_disabled_by_default(self):
+        logs = []
+        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(os.environ, {
+                "LIGHTVIEW_TRACE_RESOURCES": "0", "LIGHTVIEW_TRACE_NAVIGATION": "0"}):
+            with browser(directory, "--private", capture_output=logs) as (path, _):
+                self.cli(path, "open", self.url, "--wait")
+        self.assertNotIn("Resource trace:", logs[0])
+
+    def test_resource_trace_records_cancelled_subresource(self):
+        logs = []
+        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(os.environ, {
+                "LIGHTVIEW_TRACE_RESOURCES": "1", "LIGHTVIEW_TRACE_NAVIGATION": "0"}):
+            with browser(directory, "--private", capture_output=logs) as (path, _):
+                ctl.request(path, "open", uri=self.url + "/slow-page")
+                deadline = time.monotonic() + 10
+                while not ctl.request(path, "eval", script="document.images.length===1"):
+                    self.assertLess(time.monotonic(), deadline, "Slow image was not requested")
+                    time.sleep(0.1)
+                self.cli(path, "open", "about:blank", "--wait")
+        events = [dict(re.findall(r"([\w-]+)=([^ ]+)", line))
+                  for line in logs[0].splitlines() if "Resource trace:" in line]
+        failures = [event for event in events
+                    if event["phase"] == "failed" and event["main"] == "0"]
+        self.assertTrue(failures)
+        for failed in failures:
+            self.assertEqual(failed["failed"], "1")
+            self.assertNotEqual(failed["error-domain"], "none")
+            self.assertTrue(any(event["id"] == failed["id"] and
+                                event["sequence"] == failed["sequence"] and
+                                event["phase"] == "finished" and event["failed"] == "1"
+                                for event in events))
 
     def descendant_processes(self, root_pid, name):
         parents = {}

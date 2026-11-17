@@ -373,6 +373,15 @@ For backend diagnosis, set `LIGHTVIEW_TRACE_NAVIGATION=1` before launch to log
 navigation phases, main-resource response status, script-dialog types, and
 page-process responsiveness. Traces are off by default and include URL origins
 only, omitting credentials, paths, queries, and fragments.
+Set `LIGHTVIEW_TRACE_RESOURCES=1` for an optional lifecycle trace of every
+main resource and subresource. Each event records a resource ID, its original
+navigation sequence, elapsed time, response status, and failure domain/code.
+URLs are reduced to origins; error messages and resource bodies are omitted.
+The `finished` event retains `failed=1` after a failure, so it does not imply a
+successful download. This trace is off by default and can produce large logs.
+It uses WebKit resource signals and remains useful after a page's Resource
+Timing buffer fills; a missing entry in that buffer does not prove a request
+is still pending.
 
 `reset` terminates the current WebKit web process, opens `about:blank` in a fresh
 process, and waits until the replacement is ready. `reset --hard` also rebuilds

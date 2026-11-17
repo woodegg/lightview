@@ -4,6 +4,11 @@
 
 ### Added
 
+- Add an experimental libsoup HTTP/2 response-header guard with one bounded
+  bodyless GET/HEAD retry and immediate cancellation wakeup. It preserves
+  active responses and non-replayable requests; full endurance is pending.
+- Add optional origin-only subresource lifecycle tracing for document-loading
+  investigations, independent of the page's bounded Resource Timing buffer.
 - Add an experimental WebKit IPC invalidation cleanup for closed connections
   retained in shared synchronous-message scheduling state, with a deterministic
   native lifetime regression and companion-message/reentrant-dispatch coverage.

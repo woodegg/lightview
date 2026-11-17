@@ -92,3 +92,38 @@ subsequent stress checks do not retrospectively explain that event.
 
 See [the investigation](../../docs/stability-investigation.md) for the failed
 runs and the remaining independent 24-hour qualification gate.
+
+## Bounded response-header recovery candidate
+
+The November 17 extension
+[`http2-response-header-recovery.patch`](http2-response-header-recovery.patch)
+targets asynchronous bodyless GET/HEAD requests whose HTTP/2 request headers
+were sent but have received no response headers for 20 seconds. It excludes
+that connection from future reuse, lets existing responses and non-replayable
+requests finish, and restarts the eligible request once on a healthy
+connection. A second expiry reports a timeout. Received responses, including
+HTTP 403, are not retried by this guard. A separate cancellation source wakes
+the owner context even if the peer sends nothing.
+
+Apply the patch from the source root before configuring a new, independent
+prefix with the existing build options:
+
+```sh
+patch --batch --fuzz=0 -p1 < /path/to/http2-response-header-recovery.patch
+```
+
+The patch uses zero context lines and was checked to reproduce both qualified
+source files byte for byte. Keep the baseline runtime intact.
+This changes neither HTTP/2/IPv6/media support nor Lightview's process,
+control socket, memory thresholds, or process-recycling policy. Recovery
+logging contains connection/stream IDs and the retry bound, not URLs,
+headers, cookies, or response bodies.
+
+The extended candidate passed eleven local TLS/HTTP2 fault scenarios,
+ninety consecutive cancellations with stable FD/thread counts, five related
+upstream suites (77 subtests), 25 verifier checks, and 45 Lightview integration
+checks. A sandboxed WebKit page also completed parsing and executed its
+critical script after connection recovery. Its tested library SHA-256 is
+`fba8d47b14542192b3ec18cd6dd150214912667f915043110bfbde18bb9b11ae`.
+These checks do not establish a 24-hour stability pass; the full seventeen-site
+endurance and resource-growth audit remains required.

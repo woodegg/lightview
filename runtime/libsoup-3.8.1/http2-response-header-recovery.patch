@@ -1,0 +1,164 @@
+--- a/libsoup/http2/soup-client-message-io-http2.c
++++ b/libsoup/http2/soup-client-message-io-http2.c
+@@ -64,0 +65,2 @@
++        GSource *headers_wait_source;
++        gboolean headers_unresponsive;
+@@ -93,0 +96 @@
++        GSource *response_wait_cancel_source;
+@@ -114,0 +118 @@
++        gint64 headers_wait_started_us;
+@@ -274,0 +279,9 @@
++stop_response_wait_cancel_source (SoupHTTP2MessageData *data)
++{
++        if (!data->response_wait_cancel_source)
++                return;
++        g_source_destroy (data->response_wait_cancel_source);
++        g_clear_pointer (&data->response_wait_cancel_source, g_source_unref);
++}
++
++static void
+@@ -288,0 +302 @@
++                stop_response_wait_cancel_source (data);
+@@ -309,0 +324 @@
++                stop_response_wait_cancel_source (data);
+@@ -324,0 +340 @@
++        stop_response_wait_cancel_source (data);
+@@ -348,0 +365,107 @@
++}
++
++/* Cancellation must wake the owner context even when the peer sends no
++ * response headers, rather than waiting for another socket-read event. */
++static gboolean
++response_wait_cancelled_cb (GCancellable *cancellable, SoupHTTP2MessageData *data)
++{
++        g_clear_pointer (&data->response_wait_cancel_source, g_source_unref);
++        if (data->task)
++                soup_http2_message_data_check_status_in_idle (data);
++        return G_SOURCE_REMOVE;
++}
++
++/* A reused HTTP/2 connection can stop answering individual streams while
++ * remaining pollable. Retry only a bodyless GET/HEAD with no response headers,
++ * once, and stop assigning new work to that connection. Active response bodies
++ * and non-replayable requests keep their existing connection and deadlines. */
++#define HEADERS_WAIT_TIMEOUT_US (20 * G_USEC_PER_SEC)
++#define HEADERS_RETRY_KEY "soup-http2-response-headers-retried"
++
++static void
++stop_headers_wait_source (SoupClientMessageIOHTTP2 *io)
++{
++        if (!io->headers_wait_source)
++                return;
++        g_source_destroy (io->headers_wait_source);
++        g_clear_pointer (&io->headers_wait_source, g_source_unref);
++}
++
++static gboolean
++headers_wait_source_cb (SoupClientMessageIOHTTP2 *io)
++{
++        SoupConnection *conn;
++        GHashTableIter iter;
++        SoupHTTP2MessageData *data;
++        gboolean keep_waiting = FALSE;
++        gint64 now = g_get_monotonic_time ();
++
++        conn = g_weak_ref_get (&io->conn);
++        if (!conn || io->is_shutdown || io->error) {
++                stop_headers_wait_source (io);
++                g_clear_object (&conn);
++                return G_SOURCE_REMOVE;
++        }
++        soup_connection_set_in_use (conn, TRUE);
++        g_hash_table_iter_init (&iter, io->messages);
++        while (g_hash_table_iter_next (&iter, NULL, (gpointer *)&data)) {
++                if (!data->headers_wait_started_us || !data->task ||
++                    data->error || data->state != STATE_WRITE_DONE)
++                        continue;
++                GCancellable *cancellable = g_task_get_cancellable (data->task);
++                if (cancellable && g_cancellable_is_cancelled (cancellable)) {
++                        data->headers_wait_started_us = 0;
++                        soup_http2_message_data_check_status_in_idle (data);
++                        continue;
++                }
++                if (data->paused) {
++                        data->headers_wait_started_us = now;
++                        keep_waiting = TRUE;
++                        continue;
++                }
++                if (now - data->headers_wait_started_us < HEADERS_WAIT_TIMEOUT_US) {
++                        keep_waiting = TRUE;
++                        continue;
++                }
++                data->headers_wait_started_us = 0;
++                io->headers_unresponsive = TRUE;
++                if (!g_object_get_data (G_OBJECT (data->msg), HEADERS_RETRY_KEY)) {
++                        g_object_set_data (G_OBJECT (data->msg), HEADERS_RETRY_KEY, GINT_TO_POINTER (1));
++                        data->can_be_restarted = TRUE;
++                        set_error_for_data (data, g_error_new_literal (G_IO_ERROR, G_IO_ERROR_CONNECTION_CLOSED,
++                                            "HTTP/2 response headers stalled; retrying on a fresh connection"));
++                        g_message ("HTTP/2 response-header guard: connection=%" G_GUINT64_FORMAT " stream=%u retry=1",
++                                   io->connection_id, data->stream_id);
++                } else {
++                        data->can_be_restarted = FALSE;
++                        set_error_for_data (data, g_error_new_literal (G_IO_ERROR, G_IO_ERROR_TIMED_OUT,
++                                            "HTTP/2 response headers stalled after one retry"));
++                        g_message ("HTTP/2 response-header guard: connection=%" G_GUINT64_FORMAT " stream=%u retry=0 exhausted=1",
++                                   io->connection_id, data->stream_id);
++                }
++                /* Defer completion: callbacks can remove other messages. */
++                soup_http2_message_data_check_status_in_idle (data);
++        }
++        if (!keep_waiting)
++                stop_headers_wait_source (io);
++        soup_connection_set_in_use (conn, FALSE);
++        g_object_unref (conn);
++        return keep_waiting ? G_SOURCE_CONTINUE : G_SOURCE_REMOVE;
++}
++
++static void
++start_headers_wait (SoupHTTP2MessageData *data)
++{
++        SoupClientMessageIOHTTP2 *io = data->io;
++        const char *method = soup_message_get_method (data->msg);
++        if (!data->item->async ||
++            (method != SOUP_METHOD_GET && method != SOUP_METHOD_HEAD) ||
++            soup_message_get_request_body_stream (data->msg))
++                return;
++        data->headers_wait_started_us = g_get_monotonic_time ();
++        if (io->headers_wait_source)
++                return;
++        io->headers_wait_source = g_timeout_source_new (1000);
++        g_source_set_static_name (io->headers_wait_source, "Soup HTTP/2 response headers guard");
++        g_source_set_callback (io->headers_wait_source, (GSourceFunc)headers_wait_source_cb, io, NULL);
++        g_source_attach (io->headers_wait_source, g_main_context_get_thread_default ());
+@@ -946,0 +1070 @@
++                data->headers_wait_started_us = 0;
+@@ -1091,0 +1216 @@
++                                start_headers_wait (data);
+@@ -1538,0 +1664 @@
++        stop_response_wait_cancel_source (data);
+@@ -1762,0 +1889,3 @@
++        if (!g_hash_table_size (io->messages))
++                stop_headers_wait_source (io);
++
+@@ -1852 +1981,2 @@
+-        return soup_client_message_io_http2_is_open (iface);
++        SoupClientMessageIOHTTP2 *io = (SoupClientMessageIOHTTP2 *)iface;
++        return !io->headers_unresponsive && soup_client_message_io_http2_is_open (iface);
+@@ -2052,0 +2183,7 @@
++        if (cancellable) {
++                data->response_wait_cancel_source = g_cancellable_source_new (cancellable);
++                g_source_set_static_name (data->response_wait_cancel_source, "Soup HTTP/2 response wait cancellation");
++                g_source_set_priority (data->response_wait_cancel_source, io_priority);
++                g_source_set_callback (data->response_wait_cancel_source, (GSourceFunc)response_wait_cancelled_cb, data, NULL);
++                g_source_attach (data->response_wait_cancel_source, g_main_context_get_thread_default ());
++        }
+@@ -2064,0 +2202 @@
++        stop_headers_wait_source (io);
+@@ -2114,0 +2253,2 @@
++
++        stop_headers_wait_source (io);
+--- a/libsoup/soup-session.c
++++ b/libsoup/soup-session.c
+@@ -1394,0 +1395 @@
++        g_object_set_data (G_OBJECT (msg), "soup-http2-response-headers-retried", NULL);
