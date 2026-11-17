@@ -5,7 +5,8 @@
 ### Added
 
 - Add an experimental libsoup HTTP/2 response-header guard with one bounded
-  bodyless GET/HEAD retry and immediate cancellation wakeup. It preserves
+  bodyless GET/HEAD retry and immediate cancellation wakeup. It coalesces
+  eligible waiters once a connection is retired and preserves
   active responses and non-replayable requests; full endurance is pending.
 - Add optional origin-only subresource lifecycle tracing for document-loading
   investigations, independent of the page's bounded Resource Timing buffer.

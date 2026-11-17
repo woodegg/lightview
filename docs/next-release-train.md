@@ -389,8 +389,15 @@ subresource lifecycle tracing passed five focused browser checks and reproduced
 the loading failure with delayed HTTP 403 responses. A controlled remote-socket
 comparison then restored a stalled request without changing the application or
 control connection. The resulting experimental libsoup header-wait recovery
-and cancellation correction passed its native and browser regressions and is
-in a new strict endurance attempt. The full endurance gate remains unmet.
+and cancellation correction passed its native and browser regressions. Its
+first strict attempt then failed after 234.880 seconds on another unverified
+Microsoft document; two retries exhausted their response-header wait. A
+separate diagnostic and local regression exposed additional waits for younger
+requests on an already retired connection. Coalescing those eligible retries
+reduced the controlled delay from 37 to 21 seconds while preserving slow
+response bodies. The follow-up passed thirteen fault scenarios, 77 upstream
+subtests, 25 verifier checks and 45 browser integration checks; strict attempt
+`20261117-111544` is now running. The full endurance gate remains unmet.
 The V3 candidate completed a full 24-hour navigation run on November 10--11,
 but failed acceptance because descriptor and thread counts grew materially.
 The recorded evidence and distinction from a passing run are documented in

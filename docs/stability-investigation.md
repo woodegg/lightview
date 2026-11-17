@@ -898,4 +898,99 @@ Fresh formal attempt `20261117-102801` started on November 17 at approximately
 and the V3 decoder, with the unchanged seventeen-site set, 60-second control
 budget, memory settings, zero-maintenance requirement, and resource-growth
 gates. The main PID is 620446. Independent audit and owner-UID failure capture
-are armed. It has not completed the required 24-hour period.
+were armed. This attempt failed as described below.
+
+
+### Header-recovery candidate endurance result
+
+Attempt `20261117-102801` failed after 234.880 seconds, with 27 verified
+navigations out of 28 across all seventeen sites. Microsoft remained `loading`
+at the existing document-verification deadline. The browser retained its main
+PID and control socket, with zero resets, view rebuilds, automation timeouts,
+or maintenance recycles. This short run cannot evaluate memory growth and
+cannot count toward the 24-hour requirement.
+
+The candidate's own log confirms that recovery ran: three requests triggered
+one-retry recovery on one connection, two retries exhausted their header-wait
+bound on the replacement connection, and a later request triggered recovery
+again. The post-failure document capture observed `domInteractive` at 61.828
+seconds and DOMContentLoaded at 63.824 seconds. That observation does not
+retroactively change the failed deadline or establish which resource blocked
+parsing. No received HTTP error is retried by this guard.
+
+The failed result, independent audit, and capture were preserved. The failed
+browser was then retired, and diagnostic `20261117-103751` started with the
+same qualified application and runtime, fresh profile, all seventeen sites,
+and optional origin-only resource/navigation signals enabled. It is explicitly
+ineligible for formal endurance acceptance. Its purpose is to distinguish
+remaining request delays from parser work and inspect the bounded recovery's
+behavior without relaxing the acceptance thresholds.
+
+
+### Coalesced recovery for younger requests on a retired connection
+
+Review of the failed candidate's native log showed a request remaining on an
+already retired connection until its own later response-header deadline. A
+controlled local HTTP/2 experiment reproduced that behavior: a first request
+started immediately, and a second request joined the same stalled connection
+17 seconds later. The existing guard recovered the first request around
+20.104 seconds but left the younger request waiting until 37.120 seconds.
+Both eventually returned the expected payload on a different connection.
+
+The next candidate retains the first 20-second detection deadline and each
+message's one-retry bound. Once the connection is known to be unresponsive,
+its other eligible asynchronous bodyless GET/HEAD requests enter recovery on
+the next timer check. It continues to exclude cancelled/paused requests,
+non-replayable requests, and responses that have already received headers.
+The controlled younger request now completes around 21.162 seconds. In a
+separate interaction case, a response whose headers had already arrived
+remained on the original connection and delivered its complete body around
+42.094 seconds; it was neither interrupted nor replayed.
+
+All eleven previous fault scenarios passed against the new library, alongside
+these two interaction cases, ninety cancellation stress requests, and five
+upstream suites (77 subtests). A sandboxed WebKit page that added a second
+script seventeen seconds into a blocked parser load completed both scripts
+and parsing in 20.103 seconds. Lightview qualification passed all 25 verifier
+checks and 45 integration checks, with the library mapped in UI, network,
+and page processes as UID 1000 with no effective capabilities and NNP enabled.
+
+The first full application check aborted in the Python AT-SPI client when a
+parallel browser fixture shared its accessibility runtime directory. That
+failed result is preserved and is not counted as a passing suite. An initial
+attempt at directory isolation then used an excessively long Unix socket
+path and failed before the browser fixture made any HTTP request. The fixture
+now uses its own short runtime directory, cache and registry; the full suite
+was rerun with an exclusive QA runtime directory, including the AT-SPI UI
+control check. No application feature or test was disabled for the rerun.
+
+The new independent-prefix library SHA-256 is
+`733663f6a3afe1f9c624b62471a1218444f94253f2effdd989565983dd0ce9f5`.
+The portable [transport regression](../tests/libsoup_http2_recovery.py) also
+reproduces the contrast against the explicitly selected libraries: the earlier
+version finishes the younger request at about 37.207 seconds and fails its
+25-second deadline, while the corrected version finishes it at 20.175 seconds.
+Its separate slow-body case preserves the original connection and complete
+payload through 42.125 seconds. Fixture requests, loaded-library hashes and
+results are recorded; it does not operate the endurance browser.
+
+This addresses a reproduced additional wait on a known unresponsive connection;
+it does not prove the cause of every historical loading delay or provide a
+24-hour stability pass. The strict endurance and memory-growth gates remain
+required.
+
+
+The preceding V2 diagnostic was deliberately retired after 339 verified
+navigations over about 38 minutes, after the corrected candidate qualified.
+It recorded 74 first retries and one exhausted retry bound, with no full reset
+or view rebuild. It did not finish its diagnostic duration and is not a
+formal pass. Its logs, results and retirement record remain preserved.
+
+Strict attempt `20261117-111544` started on November 17 at 16:15:47 UTC,
+using the coalesced candidate, unchanged IPC-cleanup WebKit engine and V3
+media decoder. Main PID 684711, the dedicated control socket, full seventeen-site
+set, 60-second control budget, memory thresholds and zero-maintenance resource
+gates are pinned. Optional resource/navigation tracing is off; no debugger
+attaches during healthy testing. Independent audit, process sampling and
+post-failure UI/native network capture are armed. This new attempt must still
+complete the full 24-hour duration and resource-growth audit.
