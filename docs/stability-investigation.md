@@ -751,7 +751,7 @@ with the V3 decoder, sandbox enabled, normal mode, the same full site set and
 acceptance gates, and no proactive or network-PSS maintenance recycles. Its
 engine SHA-256 is
 `7f5e12486f7ad620e097a65d7d08d0ad32c2923dcf8222a1a5f02b7c4a197bf8`.
-It has not completed its acceptance period. A separate capture job waits for a
+It failed its acceptance period as described below. A separate capture job waits for a
 failed terminal driver verdict or independent audit before collecting document
 resource timing and connection metadata. Resource origins and DOM indices
 correlate pending styles/scripts without recording URL paths, queries, or
@@ -761,3 +761,141 @@ This correction addresses a reproduced resource-retention bug. It does not prove
 that every historical failure had the same cause, and Microsoft document-loading
 stalls remain unproven. Another independently timed full seventeen-site endurance
 run with unchanged strict acceptance gates is still required.
+
+### First cleanup-candidate endurance result
+
+Attempt `20261117-014854` ended after 24,311.532 seconds (6 h 45 min), with
+3,903 verified documents out of 3,904 navigations across all seventeen sites.
+The last Microsoft document remained `loading` after the existing document
+verification budget. The application survived with the same main PID/socket,
+zero resets, operation timeouts, navigation retries, view rebuilds, and
+maintenance recycles. The independent audit rejected the unverified document,
+incomplete duration, and sustained PSS growth. This is a failed attempt.
+
+The post-warmup PSS median increased from about 1,128 to 1,274 MiB, with a
+robust slope near 24 MiB/hour. Descriptor/thread medians increased only from
+195/85 to 200/87, below their material-growth thresholds. The main process's
+complete-round medians remained 21 threads and 39 descriptors. A post-failure
+compiler-layout-checked read found two valid connections/receive queues and no
+retained invalid connection. These observations support the targeted lifetime
+correction; they do not establish absence of other memory leaks.
+
+Stored-data analysis found a change from Amazon's small intermediate document
+to its full homepage near hour five, coinciding with a step in memory use.
+Later half-hour medians decreased, but the original acceptance gate continued
+to report growth. This correlation neither proves a leak nor excuses the
+failed resource gate.
+
+The failed Microsoft page subsequently reached `complete`, with
+`domInteractive` around 608 seconds and no reset. During the stalled period,
+a small same-origin fetch completed while repeated requests for a larger
+script were aborted by an eight-second diagnostic timer. An independent HTTP/2
+client fetched that script successfully. Different connections and request
+contexts prevent attributing this to a specific HTTP/2 or libsoup defect.
+The document's Resource Timing buffer had reached its 250-entry capacity:
+missing completed entries therefore cannot identify the blocking script.
+Optional `LIGHTVIEW_TRACE_RESOURCES` logging now records WebKit's actual
+response/failure/completion events beyond that buffer, without URL paths,
+queries, credentials, or response bodies. This improves diagnosis; it is not
+a document-stall repair or a passing endurance result.
+
+The original automatic capture ran its public control requests as root, which
+the browser correctly rejected because its control socket requires the
+browser owner's UID. The original capture is preserved and supplemented by
+owner-UID observations. Its successor drops to the socket owner's credentials
+for public control calls while keeping the separately gated metadata reader
+privileged; the actual helper was verified for status and document requests.
+
+### Resource-traced reproduction
+
+The independent diagnostic `20261117-085350` is explicitly ineligible for
+endurance acceptance. Its driver reproduced the Microsoft failure after
+423.735 seconds: 61 verified documents out of 62, with no reset or operation
+timeout. The corrected owner-UID capture successfully recorded the document
+and connection metadata. The document was still in its head with no body;
+two valid IPC connections and zero retained invalid connections remained.
+
+Unlike the bounded Resource Timing buffer, the new resource signals recorded
+actual HTTP 403 responses from Microsoft subresources. Several responses took
+about 120 seconds. A separate browser fetch returned a 148-byte HTML error
+page with status 403. Later observations found pending shared-head stylesheet
+and script requests in libsoup's HTTP/2 queue, with request writing complete,
+no response headers yet, and the read source attached. The document eventually
+became complete around 616 seconds after navigation without a reset. Its
+navigation sequence then had 593 observed resources and no resource lacking
+an observed terminal event. This is stronger evidence of delayed/rejected
+requests than the earlier inference from missing performance entries.
+
+Fresh independent IPv4 and IPv6 connections fetched the actual pending assets
+successfully. Fresh connections with the browser's User-Agent, page-readable
+cookies, and both together also succeeded. A fresh asynchronous libsoup 3.8.1
+session using that request context fetched the script over HTTP/2 normally.
+Cookie values were held only in private temporary request configuration and
+were not written into results or logs. These comparisons do not reproduce
+all browser headers, connection reuse, server timing, or HTTP-only cookies;
+they do not establish a single cause. In particular, neither disabling IPv6
+nor replacing the User-Agent is justified by these observations.
+
+A bounded diagnostic experiment now tests an existing-connection hypothesis
+after a failed verdict, using the same browser and control socket. It may close
+one uniquely identified remote socket owned by that test's network process
+and compare the same resource before and after. It performs no broad socket
+cleanup, browser reset, or intervention during a healthy attempt. Such a
+diagnostic intervention cannot count as a browser fix or passing endurance run.
+
+The first controlled comparison reproduced another Microsoft document failure
+after 515.079 seconds, with 78 verified documents out of 79. A same-browser
+bodyless fetch using no cookies then received no response within its 20-second
+diagnostic bound. Native state and the socket owner identified a unique remote
+HTTP/2 connection. Closing only that exact socket restored the same resource:
+HTTP 200 with 27,126 bytes in 0.145 seconds, with the same Lightview PID and
+control-socket inode. This supports local connection recovery; it does not
+identify why that remote connection behaved differently, and the completed
+failed verdict remains unchanged.
+
+An isolated libsoup source candidate now retires an unresponsive asynchronous
+HTTP/2 connection from future reuse after a bodyless GET/HEAD has waited for
+response headers. It uses the existing message restart path once, then surfaces
+a timeout if the retry also stalls. The first native regression warms a local
+HTTP/2 connection and delays its next response: the unmodified control retained
+that connection and failed the new-connection requirement after about 28
+seconds; the candidate obtained the complete payload on a fresh connection
+after about 20 seconds. This is only the first positive recovery case.
+Subsequent negative coverage exposed a delayed-cancellation path: a request
+with no incoming response could keep waiting after its cancellation signal.
+The second candidate adds a cancellable source on the owning context, removes
+it when the header wait finishes, and avoids retiring/retrying a cancelled
+request. It also clears sources during message teardown and owner changes.
+
+Eleven independent local TLS/HTTP2 scenarios now pass: GET and HEAD recovery,
+an exhausted one-retry bound, POST with and without a body, GET with a body,
+headers followed by a delayed body, explicit 403, GET/POST cancellation, and
+preservation of a concurrent POST on the retired connection. A frame-controlled
+server replaced an unsuitable SoupServer delayed-body fixture; those failed
+fixture results remain archived and are not counted as passing checks.
+The unmodified library failed the independent cancellation deadline, whereas
+the corrected candidate completed cancellation promptly. Ninety consecutive
+cancellations left the same fourteen descriptors and six threads after each
+batch, and a subsequent healthy request reused the original connection.
+This is lifecycle evidence, not proof against every possible memory leak.
+
+Five related upstream suites passed 77 subtests, including all 43 original
+HTTP/2 cases. Qualification additionally passed 25 verifier checks and 45
+Lightview integration checks with the candidate mapped in all three process
+roles. A sandboxed WebKit page on the local HTTP/2 fault server retrieved its
+parser-blocking script on a healthy connection after about 20 seconds,
+completed parsing, and executed the script without a process termination.
+
+The new library remains in an independent diagnostic prefix; the distribution
+and baseline libraries were preserved. Its SHA-256 is
+`fba8d47b14542192b3ec18cd6dd150214912667f915043110bfbde18bb9b11ae`.
+The [source patch and runtime notes](../runtime/libsoup-3.8.1/README.md) record
+the recovery policy. It does not retry an already received HTTP 403 or replay
+a POST, and it does not disable HTTP/2, IPv6, media, or certificate checking.
+
+Fresh formal attempt `20261117-102801` started on November 17 at approximately
+15:28 UTC on display `:1`. It pins this library, the IPC-cleanup WebKit engine,
+and the V3 decoder, with the unchanged seventeen-site set, 60-second control
+budget, memory settings, zero-maintenance requirement, and resource-growth
+gates. The main PID is 620446. Independent audit and owner-UID failure capture
+are armed. It has not completed the required 24-hour period.

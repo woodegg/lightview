@@ -83,7 +83,7 @@ typedef struct {
     guint64 navigation_view_rebuild_count;
     guint64 deferred_navigation_generation;
     guint64 network_process_recycle_count;
-    guint64 load_stop_count;
+    guint64 load_stop_count, resource_trace_sequence;
     guint64 load_watchdog_epoch;
     guint64 memory_pss_kib, network_pss_kib, previous_cpu_ticks;
     guint recovery_burst_count;
@@ -96,8 +96,14 @@ typedef struct {
     gboolean browser_cache, no_images, software_rendering, media_gl_sink_disabled;
     gboolean memory_protection_enabled, sandbox_enabled, hard_reset_used;
     gboolean mode_toggle_syncing, memory_controls_syncing;
-    gboolean current_load_committed, trace_navigation;
+    gboolean current_load_committed, trace_navigation, trace_resources;
 } Browser;
+
+typedef struct {
+    guint64 id, navigation_sequence;
+    gint64 started_us;
+    gboolean main_resource, failed;
+} ResourceTrace;
 
 typedef struct {
     Browser *browser;
@@ -164,33 +170,79 @@ static void trace_navigation(Browser *b, const char *phase, const char *uri)
         b->view ? webkit_web_view_get_page_id(b->view) : 0);
 }
 
+static gboolean traced_main_resource(WebKitWebResource *resource)
+{
+    ResourceTrace *trace = g_object_get_data(G_OBJECT(resource), "lightview-resource-trace");
+    return !trace || trace->main_resource;
+}
+
+static void trace_resource_event(Browser *b, WebKitWebResource *resource,
+    const char *phase, GError *error)
+{
+    if (!b->trace_resources) return;
+    ResourceTrace *trace = g_object_get_data(G_OBJECT(resource), "lightview-resource-trace");
+    if (!trace) return;
+    if (error) trace->failed = TRUE;
+    g_autofree char *origin = trace_origin(webkit_web_resource_get_uri(resource));
+    WebKitURIResponse *response = webkit_web_resource_get_response(resource);
+    g_message("Resource trace: id=%" G_GUINT64_FORMAT " sequence=%" G_GUINT64_FORMAT
+        " phase=%s main=%d origin=%s elapsed-ms=%" G_GINT64_FORMAT
+        " status=%u failed=%d error-domain=%s error-code=%d",
+        trace->id, trace->navigation_sequence, phase, trace->main_resource, origin,
+        (g_get_monotonic_time() - trace->started_us) / 1000,
+        response ? webkit_uri_response_get_status_code(response) : 0, trace->failed,
+        error ? g_quark_to_string(error->domain) : "none", error ? error->code : 0);
+}
+
 static void trace_resource_finished(WebKitWebResource *resource, gpointer data)
 {
-    trace_navigation(data, "main-resource-finished", webkit_web_resource_get_uri(resource));
+    if (traced_main_resource(resource))
+        trace_navigation(data, "main-resource-finished", webkit_web_resource_get_uri(resource));
+    trace_resource_event(data, resource, "finished", NULL);
 }
 
 static void trace_resource_failed(WebKitWebResource *resource, GError *error, gpointer data)
 {
-    trace_navigation(data, "main-resource-failed", webkit_web_resource_get_uri(resource));
-    g_message("Navigation trace: resource=%p error-domain=%s error-code=%d",
-        (gpointer)resource, g_quark_to_string(error->domain), error->code);
+    Browser *b = data;
+    if (b->trace_navigation && traced_main_resource(resource)) {
+        trace_navigation(b, "main-resource-failed", webkit_web_resource_get_uri(resource));
+        g_message("Navigation trace: resource=%p error-domain=%s error-code=%d",
+            (gpointer)resource, g_quark_to_string(error->domain), error->code);
+    }
+    trace_resource_event(b, resource, "failed", error);
 }
 
 static void trace_resource_response(WebKitWebResource *resource, GParamSpec *spec,
                                     gpointer data)
 {
     (void)spec;
-    trace_navigation(data, "main-resource-response", webkit_web_resource_get_uri(resource));
-    WebKitURIResponse *response = webkit_web_resource_get_response(resource);
-    if (response) g_message("Navigation trace: resource=%p status=%u",
-        (gpointer)resource, webkit_uri_response_get_status_code(response));
+    Browser *b = data;
+    if (b->trace_navigation && traced_main_resource(resource)) {
+        trace_navigation(b, "main-resource-response", webkit_web_resource_get_uri(resource));
+        WebKitURIResponse *response = webkit_web_resource_get_response(resource);
+        if (response) g_message("Navigation trace: resource=%p status=%u",
+            (gpointer)resource, webkit_uri_response_get_status_code(response));
+    }
+    trace_resource_event(b, resource, "response", NULL);
 }
 
 static void trace_resource_started(WebKitWebView *view, WebKitWebResource *resource,
                                    WebKitURIRequest *request, gpointer data)
 {
-    if (resource != webkit_web_view_get_main_resource(view)) return;
-    trace_navigation(data, "main-resource-started", webkit_uri_request_get_uri(request));
+    Browser *b = data;
+    gboolean main_resource = resource == webkit_web_view_get_main_resource(view);
+    if (!main_resource && !b->trace_resources) return;
+    if (main_resource)
+        trace_navigation(b, "main-resource-started", webkit_uri_request_get_uri(request));
+    if (b->trace_resources) {
+        ResourceTrace *trace = g_new0(ResourceTrace, 1);
+        trace->id = ++b->resource_trace_sequence;
+        trace->navigation_sequence = b->navigation_sequence;
+        trace->started_us = g_get_monotonic_time();
+        trace->main_resource = main_resource;
+        g_object_set_data_full(G_OBJECT(resource), "lightview-resource-trace", trace, g_free);
+        trace_resource_event(b, resource, "started", NULL);
+    }
     g_signal_connect(resource, "finished", G_CALLBACK(trace_resource_finished), data);
     g_signal_connect(resource, "failed", G_CALLBACK(trace_resource_failed), data);
     g_signal_connect(resource, "notify::response", G_CALLBACK(trace_resource_response), data);
@@ -2479,8 +2531,9 @@ static WebKitWebView *create_web_view(Browser *b)
     g_signal_connect(view, "notify::uri", G_CALLBACK(notify_view), b);
     g_signal_connect(view, "load-changed", G_CALLBACK(load_changed), b);
     g_signal_connect(view, "load-failed", G_CALLBACK(load_failed), b);
-    if (b->trace_navigation) {
+    if (b->trace_navigation || b->trace_resources)
         g_signal_connect(view, "resource-load-started", G_CALLBACK(trace_resource_started), b);
+    if (b->trace_navigation) {
         g_signal_connect(view, "script-dialog", G_CALLBACK(trace_script_dialog), b);
         g_signal_connect(view, "notify::is-web-process-responsive",
             G_CALLBACK(trace_process_responsive), b);
@@ -3084,6 +3137,7 @@ int main(int argc, char **argv)
         g_setenv("WEBKIT_DMABUF_RENDERER_FORCE_SHM", "1", FALSE);
     Browser b = {0};
     b.trace_navigation = environment_truthy(g_getenv("LIGHTVIEW_TRACE_NAVIGATION"));
+    b.trace_resources = environment_truthy(g_getenv("LIGHTVIEW_TRACE_RESOURCES"));
     gboolean drm_accessible = has_accessible_drm_render_node();
     const char *software_override = g_getenv("LIBGL_ALWAYS_SOFTWARE");
     if (!software_override && !drm_accessible) {
