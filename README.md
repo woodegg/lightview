@@ -110,6 +110,32 @@ it. Completion or failure appears in the status bar, with no destination prompt.
   with `--memory-kill-threshold MIB`, or use `--disable-memory-kill` to set
   WebKit's kill threshold to zero. Disabling the kill retains the earlier
   cleanup policies; it removes only WebKit's final memory termination.
+- Optional total-browser maintenance is available with
+  `--memory-recycle-threshold MIB` (256–65536). Before a new top-level
+  navigation, Lightview rebuilds WebKit when current aggregate process-tree PSS
+  reaches that explicit threshold. The default is `0` (disabled). WebKit's
+  memory-pressure and excessive-memory protection are per process, so deriving
+  an aggregate threshold from their per-process kill threshold causes healthy
+  multi-process workloads to recycle far too often. When explicitly enabled,
+  the requested URL continues after the rebuild; the content and network
+  processes are replaced while the Lightview PID, profile, persistent website
+  data, and control socket stay unchanged. This loses DOM, history, media, and
+  other page-process state and should be used only when an operator intentionally
+  prefers a total-PSS guard over uninterrupted page state. Session-only cookies
+  in private mode are not guaranteed across an engine recycle.
+- Optional NetworkProcess-only maintenance is available at navigation
+  boundaries through `--network-recycle-threshold MIB`. Its default is `0`
+  (disabled): a 128 MiB threshold proved too low for ordinary major-site use
+  and caused frequent process churn. When explicitly enabled, Lightview
+  replaces only the network process; the WebView, DOM process, generation,
+  reset count, profile, and control socket remain unchanged. Active downloads
+  and page operations defer the maintenance.
+- WebKit 2.52 can retain IPC receive-queue threads as short-lived site processes
+  come and go during repeated cross-site automation. Lightview therefore also
+  performs the same network-only maintenance at 512 threads by default. This is
+  configurable with `--network-thread-recycle-threshold COUNT`; `0` disables
+  it. Unlike a WebKit reset, this does not replace the page process, increment
+  the generation/reset count, flash the address bar, or disconnect agents.
 - `--low-memory` selects a 384 MiB target and disables WebRTC, WebGL, and
   accelerated 2D canvas. Images, audio, video, Media Source, encrypted media,
   WebAudio, and JavaScript remain enabled so ordinary and streaming sites work.
@@ -124,6 +150,19 @@ WebKit documents the cache model's effect on memory in its
 The choice of GTK 3 uses the
 [WebKitGTK 4.1 API](https://webkitgtk.org/reference/webkit2gtk/stable/index.html),
 not the obsolete WebKit1 engine.
+
+The ongoing endurance investigation includes an
+[experimental source-built WebKitGTK candidate](runtime/webkitgtk-2.52.6/README.md)
+for retained network connections, stalled Linux IPC sends, and media looping.
+Those patches are separate from the Lightview executable and are not applied
+by `make install`. Their regression results do not yet establish 24-hour
+stability; see [the investigation](docs/stability-investigation.md).
+
+An additional [gst-libav correction](runtime/gst-libav-1.24.1/README.md)
+reallocates decoded frames when retained buffer metadata disagrees with the
+negotiated picture, addressing a fatal decoder invariant seen in long tests.
+It is a separate development runtime candidate with an aborting control and
+frame-content regression, pending the same endurance qualification.
 
 WebKit uses multiple processes for rendering and networking; one view does not
 mean one OS process. JavaScript heaps, video, GPU buffers, and the content itself
@@ -280,11 +319,60 @@ JSON-compatible values rather than DOM objects, cyclic objects, or functions.
 `open` acknowledges navigation immediately. `open --wait` waits for document
 load, while `wait EXPRESSION` can wait for an application's asynchronous state.
 Neither means that all future network activity has finished. The client defaults
-to a 30-second timeout, configurable with `--timeout SECONDS` before the command.
-The browser independently expires each connection after about 30 seconds; use
-short expressions and client-side polling for long workflows. A timeout cancels
-the pending control operation; it is not a reliable way to interrupt an infinite
-JavaScript loop in the web process.
+to a 65-second timeout, configurable with `--timeout SECONDS` before the command.
+The browser independently expires each connection after about 60 seconds; use
+short expressions and client-side polling for long workflows. Use
+`--control-timeout SECONDS` (1–300) to change this limit. A page-bound timeout
+first cancels that operation and returns the retryable `operation_timeout`
+protocol error without replacing the page engine. If WebKit cannot acknowledge
+the cancellation, Lightview reloads the current document to release its
+JavaScript context while retaining the WebKit generation. Only when that reload
+also cannot release the operation does Lightview escalate to a WebKit reset, so
+a genuinely wedged JavaScript process cannot exhaust the 16-client admission
+limit. In that final fallback the command receives retryable `webkit_reset`,
+and the agent retries after `engine_state` becomes `ready`.
+`status.automation_timeout_count` is monotonic, allowing long-running agents
+and health monitors to distinguish a recovered operation timeout from a clean
+run even when no WebKit reset was required.
+
+`open URL --wait` observes the browser's monotonic `navigation_sequence` and
+returns only after a new document at the requested site and path has committed
+and finished. This avoids mistaking an already-complete previous page or a late
+commit from the page being replaced for the requested destination. The browser
+also supervises the pre-commit
+interval. If the old page keeps WebKit's main thread busy and prevents the new
+navigation from committing, Lightview first supersedes the provisional load
+with a deterministic local document, allows its callbacks to drain, and
+retries the destination up to twice in the retained WebView. This avoids
+reattaching each retry to the same provisional request. If both retries also
+stall, it replaces only the WebView/page process
+while retaining the WebKit context, network process, profile, main PID, control
+socket, and agent connection, then tries the destination in the fresh page
+process. Only a destination that still cannot commit after that second recovery
+tier resets the full WebKit engine and replays the requested URL. `status`
+exposes `navigation_watchdog_active`, the monotonic
+`navigation_retry_count`, and `navigation_view_rebuild_count`.
+`web_process_responsive` reports WebKit's current page-process responsiveness
+signal. It complements `engine_state`; a responsive process may still have an
+uncommitted remote navigation.
+`status.committed_uri` is the current document's committed address, or empty
+when its engine has been destroyed. It records local recovery documents too.
+`last_committed_uri` also retains the last visited address across a reset for
+an agent to reopen; use `committed_uri` to verify the current document.
+The first commit attempt receives the full `--control-timeout` budget; this
+avoids treating a slow but healthy remote response as a wedged WebProcess. Each
+retained-process retry receives half of that budget before escalation.
+The local blank document used to initialize a new WebView has its own bounded
+settle interval; the destination's watchdog begins only when that destination
+is actually dispatched.
+Waking from hibernation likewise initializes a local document before dispatching
+the requested remote destination, so a slow server uses the navigation budget
+instead of consuming the engine's shorter startup deadline.
+
+For backend diagnosis, set `LIGHTVIEW_TRACE_NAVIGATION=1` before launch to log
+navigation phases, main-resource response status, script-dialog types, and
+page-process responsiveness. Traces are off by default and include URL origins
+only, omitting credentials, paths, queries, and fragments.
 
 `reset` terminates the current WebKit web process, opens `about:blank` in a fresh
 process, and waits until the replacement is ready. `reset --hard` also rebuilds
@@ -296,9 +384,11 @@ is retained in `status` so an agent can decide whether to reopen it.
 Unexpected page-process crashes and WebKit memory-limit terminations use the
 same recovery path. Page commands receive a retryable `webkit_recovering` or
 `webkit_reset` protocol error while the engine is unavailable. Lightview does
-not replay state-changing automation commands. Repeated failures are bounded to
-prevent a restart loop; the toolbar reset action can retry from the reported
-`failed` state.
+not replay state-changing automation commands. A completed recovery clears its
+failure streak; only a replacement engine that fails before becoming ready is
+treated as a recovery loop. A reported `failed` state returns the non-retryable
+`webkit_failed` error until the toolbar action or `reset --hard` starts a new
+attempt.
 
 Every manual or automatic reset turns the address bar red for five seconds so
 the operator can see that page state was replaced even when Matchbox hides the
@@ -378,6 +468,54 @@ profile locking, and socket lifecycle. It does not require
 external sites, credentials, or login tokens. It does require a working display
 backend and a host that permits WebKit's process sandbox.
 
+For a time-bounded major-site stability run, start an isolated browser and use
+`tools/stability-test.py --socket PATH --duration-hours 24 --output NEW.csv`.
+Each run requires a fresh output path; an existing CSV is never overwritten,
+including if a service manager unexpectedly restarts the driver. The test exits
+nonzero if the engine enters `failed`, the control connection is lost, the main
+process changes, any navigation records a load error, any WebKit reset or
+WebView rebuild occurs, a page-operation timeout is recorded, document content
+cannot be verified, any configured site remains unexercised,
+the requested duration is not completed, or a run of at least four hours shows
+sustained post-warmup PSS/FD/thread growth. Resource growth is evaluated across
+complete repetitions of the same site set: both a robust positive slope and a
+material early-to-late increase are required, so a single heavy page or normal
+cache warmup is not classified as a leak. Its final JSON includes a strict
+`passed` verdict, `failure_reasons`, and the measured resource trend; the CSV
+includes timestamps, resource use, resets, proactive recycle counts, and DOM
+size signals. A reset, page-operation timeout, load error, or changed main PID
+stops the run immediately after its evidence row is flushed. A document with
+neither body elements nor visible text is rejected even if it has a title.
+Page probes allow the browser's configured control timeout plus a five-second
+response margin, so a busy page is judged by the same watchdog used by agents.
+Lightview checks a continuing load after half that timeout (at least five
+seconds). Its watchdog stops remaining resources only after the document has
+a body and `DOMContentLoaded` has completed. A response can commit while
+stylesheets or deferred scripts still block parsing; that state must not be
+stopped into a permanently empty document. An inconclusive check is deferred,
+and its JavaScript operation has a separate five-second cancellation timer.
+Stopping resources retains the document, WebKit generation, PID, profile,
+and control socket. A new `open` cancels the old document's timer and pending
+check before replacement begins. The load watchdog never stops an uncommitted
+main resource; pre-commit failures remain owned by the navigation watchdog.
+`status` exposes `load_watchdog_active`,
+`load_watchdog_seconds`, and `load_stop_count`; the stability CSV records the
+stop count before and after each site. The stability runner also has a shorter
+per-site resource-observation budget. When that budget expires, it still probes
+the committed document through JavaScript. If parsing is still in progress,
+it waits within the existing configured control budget from commit. A document
+that remains unready at that deadline fails; a continuing resource load can
+pass only with readable, populated content. UI-process URL/title metadata alone
+cannot count as a successful navigation. The next `open` directly replaces the
+active load. A separate `stop_loading()` before the new remote
+request can leave the replacement permanently provisional. Ordinary completed
+pages also receive the full DOM automation probe. A local blank commit
+or stale previous document cannot satisfy `open --wait` or the stability
+runner merely because the address bar already shows the requested URL.
+If WebKit terminates while a page probe is completing, the control protocol
+returns retryable `webkit_reset` after the retained engine restores the page;
+the transient callback-order race is not exposed as a script-result failure.
+
 After explicitly installing the nested-container launcher, run the same suite
 through that path without disabling WebKit's sandbox:
 
@@ -405,7 +543,15 @@ Do not use `WEBKIT_DISABLE_DMABUF_RENDERER=1` with WebKitGTK 2.52. It can leave
 the accelerated backing store without a buffer transport and crash when media
 or another composited layer appears. Lightview removes that legacy setting and
 selects `WEBKIT_DMABUF_RENDERER_FORCE_SHM=1` by default. The shared-memory path
-also keeps media compositing stable in containers without usable DRM devices.
+provides buffer transport in containers without usable DRM devices.
+When the current user cannot open any `/dev/dri/renderD*` node and
+`WEBKIT_GST_DISABLE_GL_SINK` was not explicitly set, Lightview disables only
+GStreamer's GL video sink. Media playback falls back to the ordinary sink,
+avoiding GL teardown failures without forcing slow software rendering for the
+whole page. WebKit keeps its normal on-demand composition policy and hosts with
+an accessible render node are unchanged. `status` and `version` expose
+`media_gl_sink_disabled` and whether `LIBGL_ALWAYS_SOFTWARE` was explicitly
+selected as `software_rendering`.
 
 There are currently no tabs, download manager UI, bookmarks, password manager, popup
 windows, or permission prompts for camera/microphone/location. Website requests

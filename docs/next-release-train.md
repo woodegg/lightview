@@ -4,8 +4,10 @@ This document records accepted requirements for the next Lightview release.
 Items remain requirements until implementation, validation, and release work
 are completed.
 
-Release status: completed and released as 0.1.11 on 2026-10-02. The final scope
-adds LTV-016 to the requirements released in 0.1.8 through 0.1.10.
+Next train: 0.1.12 development, including LTV-017. Its full endurance
+acceptance remains unmet; merging development work does not qualify a release.
+The last formal release is 0.1.11, published on 2026-10-02 with LTV-016 and
+the requirements released in 0.1.8 through 0.1.10.
 
 ## LTV-008 — Version information button
 
@@ -307,7 +309,7 @@ Requirements:
 Acceptance:
 
 - Integration tests switch between isolated profiles and verify that each
-  profile retains its own local storage.
+  profile retains its own persistent cookies/site data.
 - Tests verify stable PID, socket inode, and lease across switches and confirm
   that a lock failure leaves the current generation and storage intact.
 - A real GTK chooser test starts with a locked profile, selects another folder,
@@ -349,3 +351,185 @@ Acceptance:
   mount namespace after the launched process exits.
 - Run the complete GTK/WebKit integration suite and verify the existing direct
   launch path remains unchanged.
+
+## LTV-017 — Long-running navigation recovery
+
+Status: in development.
+
+The current engine candidate includes reviewable
+[WebKitGTK source patches](../runtime/webkitgtk-2.52.6/README.md) for a detached
+keepalive connection leak, a Linux `ETOOMANYREFS` send-queue stall, and segmented
+media-loop seeking. Targeted regressions pass; the full 24-hour gate below is
+still required. Building Lightview alone does not patch the distribution
+WebKit runtime. Evidence and failed-run distinctions are maintained in
+[the investigation](stability-investigation.md).
+
+The next runtime iteration also includes a
+[gst-libav frame-buffer correction](../runtime/gst-libav-1.24.1/README.md)
+for the fatal video-metadata width/height invariant. The original decoder
+aborts under the matching allocation fault; the candidate preserves all 288
+decoded frames, dimensions, and checked pixels through resolution changes.
+The first correction still exposed mismatched output metadata. A stricter
+negative test then found a null-input-frame crash during output-error draining
+in the second candidate. The third verifies matching output metadata, avoids
+mapping incompatible direct-rendering destinations, and handles that drain
+error without crashing. Both earlier candidates are withdrawn.
+It passed six upstream suites, four browser media combinations, and all 42
+browser integration checks before entering a separately timed endurance run.
+The UI queue accumulation and Microsoft document stalls remain unresolved.
+The V3 candidate completed a full 24-hour navigation run on November 10--11,
+but failed acceptance because descriptor and thread counts grew materially.
+The recorded evidence and distinction from a passing run are documented in
+the investigation.
+
+Keep an automation instance usable during repeated heavy cross-site navigation
+without allowing retained WebKit allocations to reach the last-resort kill
+threshold or misreporting a permanently failed engine as retryable.
+
+Requirements:
+
+- Clear the recovery-loop streak after the replacement blank engine reaches a
+  completed ready state; continue bounding failures that occur during recovery.
+- Return non-retryable `webkit_failed` for page commands while the engine is in
+  `failed`, while keeping status and manual hard reset available on the same
+  socket.
+- Before a new navigation, optionally hard-recycle WebKit when total
+  process-tree PSS has reached an explicitly configured maintenance threshold.
+  Keep this policy disabled by default: WebKit's memory-pressure kill threshold
+  applies per process and must not be used to derive an aggregate browser
+  threshold. Preserve the main PID, profile, socket, and requested destination.
+  Make the decision from a current sample, not the periodic UI sample.
+- Include the WebKit network process in hard maintenance without replacing its
+  data manager, so accumulated receive queues are released while profile and
+  persistent website data remain available.
+- Independently replace a growing NetworkProcess at navigation boundaries
+  without replacing the WebView, changing its generation/reset count, flashing
+  the reset warning, or changing the main PID/profile/socket. Preserve both
+  persistent and session cookies, defer while downloads or page operations are
+  active, expose the threshold/count, and allow the policy to be disabled.
+- Expose the maintenance threshold and proactive recycle count through status.
+- Stop stability testing with a failing exit status on permanent engine or
+  control failure, a changed main PID, any load error, any page-operation
+  timeout, any WebKit reset, or an incomplete wall-clock duration target.
+  Report a strict machine-readable verdict separately from mere process
+  survival.
+- For runs of at least four hours, require enough complete repeated site rounds
+  to evaluate post-warmup PSS, FD, and thread trends. Fail only when a robust
+  positive slope is accompanied by a material early-to-late increase, avoiding
+  false leak reports from a single heavy site or ordinary cache warmup.
+- Cancel a page operation after its configurable timeout and return retryable
+  `operation_timeout` without replacing a responsive engine. Release control
+  admission slots independently of callbacks, reload the current document if
+  WebKit does not acknowledge cancellation, and escalate to an engine reset
+  only if the bounded reload fallback also cannot release the operation.
+- Default the page-operation watchdog to 60 seconds and give the bundled client
+  a five-second response margin, avoiding resets caused by transient long tasks
+  on heavy pages while keeping genuinely wedged operations bounded.
+- After a top-level document commits, stop a load that remains active for half
+  the operation timeout (with a five-second minimum). Retain the current
+  document and WebKit process, expose the stop count, and leave the existing
+  operation watchdog as the fallback for a genuinely wedged main thread. A
+  shorter stability-runner deadline must leave the load active and still
+  verify the committed document through JavaScript before counting success.
+  The next `open` asks WebKit to replace it
+  directly, without an explicit stop followed by a separate remote load.
+  Cancel the old document's load watchdog when accepting that replacement,
+  and never let it stop an uncommitted main resource owned by the navigation
+  watchdog.
+- Supervise navigation before its first commit. If the previous page blocks a
+  requested destination from committing, supersede the provisional request
+  with a deterministic local document, wait briefly for late callbacks, and
+  retry up to twice in the retained WebView. Do not issue `stop_loading()` and
+  a replacement remote request in the same provisional state. If it still
+  cannot commit, replace only the WebView/page process while retaining the
+  context, network process, profile, main PID, control socket, and agent
+  connection. Reset the full WebKit engine and replay the URL only if the fresh
+  page process also fails. Expose a monotonic WebView-rebuild counter.
+- Give the initial commit attempt the full configured control-timeout budget
+  and each retained-process retry half that budget. Do not rebuild a healthy
+  page process merely because a remote server takes 30--60 seconds to begin its
+  response.
+- Bound the local blank bootstrap used at startup and after a WebView rebuild.
+  Dispatch the retained destination even if the blank document omits its finish
+  callback, and do not charge blank-process startup time to the destination's
+  navigation watchdog.
+- Expose a monotonic committed-navigation sequence so `open --wait` cannot
+  return against a stale completed document.
+- Require `open --wait` to reach the requested site and path, and keep a late
+  cross-site commit from cancelling the watchdog for the current destination.
+- Record generation, committed-navigation sequence, loading state, and whether
+  a top-level load began while a page operation was pending when its watchdog
+  expires; do not include page URLs in this diagnostic.
+- Exercise page probes through the browser's configured operation watchdog,
+  with enough client margin to receive a structured timeout/reset response.
+- Give navigation polling enough time for the complete bounded retained-view
+  retry sequence, independently of the shorter post-commit load deadline used
+  for continuously loading documents.
+- Do not stop parser-blocking stylesheets or deferred scripts merely because
+  the main response committed. Confirm DOMContentLoaded before stopping
+  remaining resources, cancel stale internal probes on navigation/reset, and
+  make forced resets terminate retired workers even if an asynchronous probe
+  still holds the old view. Keep the shorter resource-observation budget
+  independent of the bounded document-ready wait in the verifier.
+- Require the duration runner to observe both a newer commit and the requested
+  site's committed document before treating a navigation as complete. A local
+  blank commit or prior site's late commit must not qualify merely because
+  the current provisional address already matches the requested site. Apply
+  the same check to `open --wait` and the final CSV verdict.
+- Expose `committed_uri` for the current document independently of the
+  last-visited address retained for recovery. Clear it when the engine is
+  destroyed and record local recovery commits. Wake on a local bootstrap, then
+  dispatch a requested remote URL under its navigation timeout.
+- Normalize a JavaScript completion that races with WebKit termination to a
+  retryable reset response, including when the invalid-result callback arrives
+  before the process-termination signal.
+- Allow proactive network-process maintenance with an empty cookie jar.
+- When no DRM render node is accessible, select the non-GL GStreamer video sink
+  before GTK/WebKit initialization so cross-site process teardown does not
+  enter an unusable GL dispatch path. Do not force software rendering for the
+  whole page; keep WebKit's on-demand composition policy, preserve the default
+  path on hosts where the user can open a render node, and expose the selected
+  path to automation.
+
+Acceptance:
+
+- Three automatic page-process failures that each recover successfully remain
+  usable through the same PID and socket.
+- A proactive recycle reaches the requested URL with a new generation through
+  the same PID and socket, with a new network-process PID and preserved persistent
+  cookies.
+- A network-only recycle reaches the requested URL with a new network PID while
+  keeping the WebProcess generation and reset count unchanged and preserving a
+  session cookie.
+- A local 24-hour `DISPLAY=:1` major-site rotation retains the same main PID
+  and control socket, finishes with a live `ready` or `suspended` engine, and
+  records zero full resets, WebView rebuilds, automation timeouts, destination
+  mismatches, blank documents, unverified documents, or load errors. Exercise
+  every configured site with readable document content; address-bar metadata
+  alone cannot satisfy coverage. Stop a failed candidate after
+  preserving its evidence rather than counting recovered failures as healthy
+  uptime. Evaluate post-warmup PSS, FD, and thread trends over at least four
+  hours and require no sustained material growth.
+- Repeated page-operation timeouts do not accumulate control clients or page
+  requests, and status remains reachable after more than 16 timed-out requests.
+- A navigation requested while the old WebProcess main thread is wedged is
+  automatically replayed after recovery and reaches the destination through
+  the same main PID and socket.
+- A provisional main resource whose first request exceeds the navigation
+  budget succeeds on an in-place retry with the same generation, reset count,
+  PID, profile, and socket. Three stalled attempts rebuild only the WebView/page
+  process and reach the destination without changing reset count, PID, profile,
+  socket, or agent connection. A destination that also stalls in the fresh page
+  process reaches the full reset fallback without looping indefinitely.
+- A destination that takes longer than the ten-second engine-startup deadline
+  after hibernation still commits within its configured navigation budget,
+  without a reset or false blank-document success.
+- A committed document with a resource that never finishes is stopped within
+  the load budget, remains scriptable, and does not change the WebKit
+  generation or reset count.
+- Replacing a continuously loading committed page near the end of its load
+  budget with a slow main document does not let the old timer stop the new
+  request, increment the load-stop count, or reset WebKit.
+- A GPU-restricted-container rotation has no GL dispatch assertion or hidden
+  WebKit subprocess crash, while a host with an accessible render node is not
+  forced into software rendering.

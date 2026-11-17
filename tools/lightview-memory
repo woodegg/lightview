@@ -31,7 +31,16 @@ def measure(pid):
                 fields = line.split()
                 if fields[0] in ("Rss:", "Pss:"):
                     totals[fields[0][:-1].lower() + "_mib"] = round(int(fields[1]) / 1024, 2)
-            rows.append({"pid": child, "name": Path(f"/proc/{child}/comm").read_text().strip(), **totals})
+            status = {}
+            for line in Path(f"/proc/{child}/status").read_text().splitlines():
+                if ":" in line:
+                    key, value = line.split(":", 1)
+                    status[key] = value.strip()
+            rows.append({"pid": child,
+                         "name": Path(f"/proc/{child}/comm").read_text().strip(),
+                         "threads": int(status["Threads"]),
+                         "fds": sum(1 for _ in Path(f"/proc/{child}/fd").iterdir()),
+                         **totals})
         except OSError as error:
             rows.append({"pid": child, "error": str(error)})
     return {"processes": rows,

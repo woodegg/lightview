@@ -7,6 +7,16 @@ import socket
 import sys
 import time
 from pathlib import Path
+from urllib.parse import urlsplit
+
+
+class ControlError(RuntimeError):
+    """A structured error returned by Lightview's control protocol."""
+
+    def __init__(self, message, code=None, retryable=False):
+        super().__init__(message)
+        self.code = code
+        self.retryable = retryable
 
 
 def default_socket():
@@ -16,7 +26,7 @@ def default_socket():
     return str(Path(runtime) / "lightview" / "control.sock")
 
 
-def request(socket_path, command, timeout=30, **fields):
+def request(socket_path, command, timeout=65, **fields):
     payload = json.dumps({"command": command, **fields}).encode() + b"\n"
     if len(payload) > 1024 * 1024:
         raise ValueError("Request exceeds 1 MiB")
@@ -30,7 +40,9 @@ def request(socket_path, command, timeout=30, **fields):
         raise RuntimeError("Incomplete or oversized response from browser")
     response = json.loads(line)
     if not response.get("ok"):
-        raise RuntimeError(response.get("error", "Browser request failed"))
+        raise ControlError(response.get("error", "Browser request failed"),
+                           response.get("error_code"),
+                           bool(response.get("retryable", False)))
     return response["result"]
 
 
@@ -75,10 +87,70 @@ def wait_for_recovery(path, operation, timeout):
     raise TimeoutError("WebKit reset timed out")
 
 
+def navigation_target_reached(expected, actual):
+    """Match the requested destination while allowing ordinary site redirects."""
+    if not expected or not actual:
+        return False
+    if "://" not in expected and not expected.startswith(("about:", "file:")):
+        expected = "https://" + expected
+    wanted = urlsplit(expected)
+    landed = urlsplit(actual)
+    if wanted.scheme not in ("http", "https") or landed.scheme not in ("http", "https"):
+        return expected == actual
+    wanted_host = (wanted.hostname or "").lower().removeprefix("www.")
+    landed_host = (landed.hostname or "").lower().removeprefix("www.")
+    same_site = (wanted_host and landed_host and
+                 (wanted_host == landed_host or
+                  wanted_host.endswith("." + landed_host) or
+                  landed_host.endswith("." + wanted_host)))
+    if not same_site:
+        return False
+    wanted_path = wanted.path.rstrip("/")
+    landed_path = landed.path.rstrip("/")
+    return not wanted_path or wanted_path == landed_path
+
+
+def navigation_has_committed(state, previous_sequence, expected_uri):
+    """Require the destination document, not just its provisional address."""
+    return bool(
+        state.get("engine_state") == "ready" and
+        state.get("navigation_sequence", 0) > previous_sequence and
+        navigation_target_reached(expected_uri, state.get(
+            "committed_uri", state.get("last_committed_uri", ""))) and
+        navigation_target_reached(expected_uri, state.get("uri", "")))
+
+
+def wait_for_navigation(path, previous_sequence, expected_uri, timeout, lease=None):
+    deadline = time.monotonic() + timeout
+    last_error = "navigation has not committed"
+    while time.monotonic() < deadline:
+        remaining = max(0.01, deadline - time.monotonic())
+        state = request(path, "status", remaining)
+        if state.get("engine_state") == "failed":
+            raise RuntimeError(state.get("load_error") or "WebKit recovery failed")
+        if state.get("load_error"):
+            raise RuntimeError(state["load_error"])
+        committed = navigation_has_committed(state, previous_sequence, expected_uri)
+        if committed and not state.get("loading"):
+            try:
+                ready = request(path, "eval", max(0.01, deadline - time.monotonic()),
+                                script="document.readyState === 'complete'", lease=lease)
+                if ready:
+                    return True
+            except RuntimeError as error:
+                last_error = str(error)
+        elif not committed:
+            document_uri = state.get("committed_uri", state.get("last_committed_uri"))
+            last_error = (f"requested {expected_uri}, committed document URL is "
+                          f"{document_uri or '<empty>'}")
+        time.sleep(min(0.1, max(0, deadline - time.monotonic())))
+    raise TimeoutError(f"Navigation timed out: {last_error}")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--socket", default=default_socket(), help="browser control socket")
-    parser.add_argument("--timeout", type=float, default=30, help="timeout in seconds")
+    parser.add_argument("--timeout", type=float, default=65, help="timeout in seconds")
     parser.add_argument("--lease", default=os.environ.get("LIGHTVIEW_LEASE"),
                         help="agent lease token (or set LIGHTVIEW_LEASE)")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -168,12 +240,16 @@ def main():
                     return true;
                 }})()"""
                 command = "eval"
+            previous_navigation = None
+            if args.command == "open" and args.wait:
+                previous_navigation = request(
+                    args.socket, "status", args.timeout).get("navigation_sequence", 0)
             result = request(args.socket, command, args.timeout, **fields)
             if args.command in ("reset", "mode", "memory-protection", "profile", "wake"):
                 result = wait_for_recovery(args.socket, result, args.timeout)
             elif args.command == "open" and args.wait:
-                result = wait_for(args.socket, "document.readyState === 'complete'",
-                                  args.timeout, args.lease)
+                result = wait_for_navigation(args.socket, previous_navigation,
+                                             args.uri, args.timeout, args.lease)
         print(json.dumps(result, ensure_ascii=False))
         return 0
     except (OSError, ValueError, RuntimeError) as error:

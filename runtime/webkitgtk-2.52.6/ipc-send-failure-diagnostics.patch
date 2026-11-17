@@ -1,0 +1,39 @@
+--- a/Source/WebKit/Platform/IPC/glib/ConnectionGLib.cpp
++++ b/Source/WebKit/Platform/IPC/glib/ConnectionGLib.cpp
+@@ -339,6 +339,7 @@
+ 
+     UnixMessage outputMessage(encoder.get());
+     if (outputMessage.attachments().size() > (s_attachmentMaxAmount - 1)) {
++        WTFLogAlways("Lightview IPC diagnostic: attachment limit exceeded, count=%zu", outputMessage.attachments().size());
+         ASSERT_NOT_REACHED();
+         return false;
+     }
+@@ -455,6 +456,7 @@
+         return false;
+     }
+ 
++    WTFLogAlways("Lightview IPC diagnostic: sendmsg failed without pending output, domain=%s code=%d fd=%d", g_quark_to_string(error->domain), error->code, g_socket_get_fd(m_socket.get()));
+     if (m_isConnected)
+         RELEASE_LOG_ERROR(IPC, "Error sending IPC message on socket %d in process %d: %s", g_socket_get_fd(m_socket.get()), getpid(), error->message);
+     return false;
+--- a/Source/WebKit/Platform/IPC/unix/UnixMessage.h
++++ b/Source/WebKit/Platform/IPC/unix/UnixMessage.h
+@@ -148,12 +148,16 @@
+     bool setBodyOutOfLine()
+     {
+         RefPtr oolMessageBody = WebCore::SharedMemory::allocate(bodySize());
+-        if (!oolMessageBody)
++        if (!oolMessageBody) {
++            WTFLogAlways("Lightview IPC diagnostic: out-of-line shared-memory allocation failed, bytes=%zu", bodySize());
+             return false;
++        }
+ 
+         auto handle = oolMessageBody->createHandle(WebCore::SharedMemory::Protection::ReadOnly);
+-        if (!handle)
++        if (!handle) {
++            WTFLogAlways("Lightview IPC diagnostic: out-of-line read-only handle creation failed, bytes=%zu", bodySize());
+             return false;
++        }
+ 
+         m_messageInfo.setBodyOutOfLine();
+         memcpySpan(oolMessageBody->mutableSpan(), m_body);

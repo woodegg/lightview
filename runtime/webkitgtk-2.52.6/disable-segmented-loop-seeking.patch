@@ -1,0 +1,28 @@
+--- a/Source/WebCore/platform/graphics/gstreamer/MediaPlayerPrivateGStreamer.cpp
++++ b/Source/WebCore/platform/graphics/gstreamer/MediaPlayerPrivateGStreamer.cpp
+@@ -3969,22 +3969,9 @@
+ 
+ bool MediaPlayerPrivateGStreamer::isSeamlessSeekingEnabled() const
+ {
+-    RefPtr player = m_player.get();
+-    if (!player) [[unlikely]]
+-        return false;
+-
+-    // Seamless seeking makes more sense for videos, in order to avoid a frame flushing when looping
+-    // back to the beginning of the media.
+-    if (!player->isVideoPlayer())
+-        return false;
+-
+-    // The GStreamer oggdemux element doesn't handle segment seeks.
+-    if (m_containerType == ContainerType::Ogg) {
+-        GST_DEBUG_OBJECT(m_pipeline.get(), "Seamless seeking not supported for media muxed in Ogg container");
+-        return false;
+-    }
+-
+-    return player->isLooping() && m_isSegmentSeekAllowed;
++    // Non-flushing segment seeks can stall looping playback with WebKitWebSrc.
++    // Retain ordinary HTML media looping through the end-of-stream path.
++    return false;
+ }
+ 
+ void MediaPlayerPrivateGStreamer::triggerRepaint(GRefPtr<GstSample>&& sample)
