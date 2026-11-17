@@ -23,7 +23,7 @@
 +                stop_response_wait_cancel_source (data);
 @@ -324,0 +340 @@
 +        stop_response_wait_cancel_source (data);
-@@ -348,0 +365,107 @@
+@@ -348,0 +365,111 @@
 +}
 +
 +/* Cancellation must wake the owner context even when the peer sends no
@@ -85,7 +85,11 @@
 +                        keep_waiting = TRUE;
 +                        continue;
 +                }
-+                if (now - data->headers_wait_started_us < HEADERS_WAIT_TIMEOUT_US) {
++                /* Once this connection has stopped answering headers, do not
++                 * make younger eligible streams wait for their own deadline.
++                 * Completed responses and non-replayable requests are untouched. */
++                if (!io->headers_unresponsive &&
++                    now - data->headers_wait_started_us < HEADERS_WAIT_TIMEOUT_US) {
 +                        keep_waiting = TRUE;
 +                        continue;
 +                }
@@ -131,21 +135,21 @@
 +        g_source_set_static_name (io->headers_wait_source, "Soup HTTP/2 response headers guard");
 +        g_source_set_callback (io->headers_wait_source, (GSourceFunc)headers_wait_source_cb, io, NULL);
 +        g_source_attach (io->headers_wait_source, g_main_context_get_thread_default ());
-@@ -946,0 +1070 @@
+@@ -946,0 +1074 @@
 +                data->headers_wait_started_us = 0;
-@@ -1091,0 +1216 @@
+@@ -1091,0 +1220 @@
 +                                start_headers_wait (data);
-@@ -1538,0 +1664 @@
+@@ -1538,0 +1668 @@
 +        stop_response_wait_cancel_source (data);
-@@ -1762,0 +1889,3 @@
+@@ -1762,0 +1893,3 @@
 +        if (!g_hash_table_size (io->messages))
 +                stop_headers_wait_source (io);
 +
-@@ -1852 +1981,2 @@
+@@ -1852 +1985,2 @@
 -        return soup_client_message_io_http2_is_open (iface);
 +        SoupClientMessageIOHTTP2 *io = (SoupClientMessageIOHTTP2 *)iface;
 +        return !io->headers_unresponsive && soup_client_message_io_http2_is_open (iface);
-@@ -2052,0 +2183,7 @@
+@@ -2052,0 +2187,7 @@
 +        if (cancellable) {
 +                data->response_wait_cancel_source = g_cancellable_source_new (cancellable);
 +                g_source_set_static_name (data->response_wait_cancel_source, "Soup HTTP/2 response wait cancellation");
@@ -153,9 +157,9 @@
 +                g_source_set_callback (data->response_wait_cancel_source, (GSourceFunc)response_wait_cancelled_cb, data, NULL);
 +                g_source_attach (data->response_wait_cancel_source, g_main_context_get_thread_default ());
 +        }
-@@ -2064,0 +2202 @@
+@@ -2064,0 +2206 @@
 +        stop_headers_wait_source (io);
-@@ -2114,0 +2253,2 @@
+@@ -2114,0 +2257,2 @@
 +
 +        stop_headers_wait_source (io);
 --- a/libsoup/soup-session.c

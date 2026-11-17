@@ -100,8 +100,11 @@ The November 17 extension
 targets asynchronous bodyless GET/HEAD requests whose HTTP/2 request headers
 were sent but have received no response headers for 20 seconds. It excludes
 that connection from future reuse, lets existing responses and non-replayable
-requests finish, and restarts the eligible request once on a healthy
-connection. A second expiry reports a timeout. Received responses, including
+requests finish, and restarts the eligible request once on a fresh
+connection. Once a connection is known to be unresponsive, other eligible
+requests already waiting on it enter the same bounded recovery on the next
+check, without waiting for each stream's separate 20-second deadline. A second
+expiry reports a timeout. Received responses, including
 HTTP 403, are not retried by this guard. A separate cancellation source wakes
 the owner context even if the peer sends nothing.
 
@@ -119,11 +122,42 @@ control socket, memory thresholds, or process-recycling policy. Recovery
 logging contains connection/stream IDs and the retry bound, not URLs,
 headers, cookies, or response bodies.
 
-The extended candidate passed eleven local TLS/HTTP2 fault scenarios,
+The coalesced candidate passed thirteen local TLS/HTTP2 fault scenarios,
 ninety consecutive cancellations with stable FD/thread counts, five related
 upstream suites (77 subtests), 25 verifier checks, and 45 Lightview integration
 checks. A sandboxed WebKit page also completed parsing and executed its
-critical script after connection recovery. Its tested library SHA-256 is
-`fba8d47b14542192b3ec18cd6dd150214912667f915043110bfbde18bb9b11ae`.
+critical and late-added scripts after connection recovery. Its tested library SHA-256 is
+`733663f6a3afe1f9c624b62471a1218444f94253f2effdd989565983dd0ce9f5`.
 These checks do not establish a 24-hour stability pass; the full seventeen-site
 endurance and resource-growth audit remains required.
+
+## Reproducing the younger-stream regression
+
+[`tests/libsoup_http2_recovery.py`](../../tests/libsoup_http2_recovery.py) runs
+an independent TLS/HTTP2 fixture on loopback. It requires the distribution
+Python GI/Soup 3 bindings, `openssl`, and Python package `h2` (tested with
+4.3.0). These are optional test dependencies. The fixture trusts only its own
+generated certificate, checks the actually loaded library hash, and leaves
+system libraries and running browsers untouched.
+
+From the Lightview checkout, supply the independent runtime's library and a
+new output directory:
+
+```sh
+/usr/bin/python3 tests/libsoup_http2_recovery.py \
+  --library /path/to/prefix/lib/libsoup-3.0.so.0.8.1 \
+  --output-dir /tmp/lightview-http2-regression
+```
+
+If `h2` is installed in an isolated test directory, include that directory in
+`PYTHONPATH`. By default both cases run concurrently in about 43 seconds. The
+first starts a second request seventeen seconds into a stalled connection and
+requires both responses before 25 seconds. The second confirms that a response
+whose headers already arrived stays on the original connection and delivers
+its delayed body in full. Results include timings, connection IDs, payload
+hashes and stderr. Both client connection IDs and server-side TCP connection
+IDs are checked, including that the younger request reached the stalled
+connection before it was retired. Any failed case produces a nonzero exit
+status. The earlier
+per-stream guard fails the first case at about 37 seconds. This component
+regression does not replace the full browser endurance gate.
