@@ -7,7 +7,11 @@
 - Add an experimental libsoup HTTP/2 response-header guard with one bounded
   bodyless GET/HEAD retry and immediate cancellation wakeup. It coalesces
   eligible waiters once a connection is retired and preserves
-  active responses and non-replayable requests; full endurance is pending.
+  active responses and non-replayable requests. Its single retry uses HTTP/1.1
+  with a separate header-wait bound; normal requests retain HTTP/2.
+  Restore pending asynchronous HTTP/1.1 reads across pause/resume and preserve
+  cancellation while paused. Portable transport and native pause regressions
+  accompany the patch; full endurance is pending.
 - Add optional origin-only subresource lifecycle tracing for document-loading
   investigations, independent of the page's bounded Resource Timing buffer.
 - Add an experimental WebKit IPC invalidation cleanup for closed connections
