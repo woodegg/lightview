@@ -376,7 +376,12 @@ mapping incompatible direct-rendering destinations, and handles that drain
 error without crashing. Both earlier candidates are withdrawn.
 It passed six upstream suites, four browser media combinations, and all 42
 browser integration checks before entering a separately timed endurance run.
-The UI queue accumulation and Microsoft document stalls remain unresolved.
+The November 17 candidate additionally clears shared synchronous-message
+scheduling entries and queued messages when an IPC connection is invalidated.
+A deterministic native regression reproduces retention before the fix and
+checks connection release and companion-message delivery after it. This targets
+the observed UI queue accumulation; endurance qualification and Microsoft
+document-stall investigation remain outstanding.
 The V3 candidate completed a full 24-hour navigation run on November 10--11,
 but failed acceptance because descriptor and thread counts grew materially.
 The recorded evidence and distinction from a passing run are documented in

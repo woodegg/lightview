@@ -686,7 +686,7 @@ IPC Connection objects and 64 named receive threads. Of those connections,
 references. Their work queues remained allocated. This provides concrete
 evidence of retained closed connections, beyond the allocator-thread naming
 ambiguity described above. The exact reference owners and missing release
-path have not yet been established, and no fix for this retention is claimed.
+path had not been established at the November 16 review.
 
 Intermittent document-loading failures, particularly on Microsoft, also
 remain unresolved. Completed HTML responses with an unready document and
@@ -698,6 +698,66 @@ As of the November 16 review, all 291 V3 manifests identified the same
 application, WebKit, libsoup, and decoder builds introduced on November 7.
 No later fix entered that series of runs. Repeated background testing and
 evidence capture must not be described as ongoing automatic source repair.
-The decoder abort and drain-error corrections are reproducible fixes; the
-IPC-retention and loading failures still require targeted investigation,
+At that review, the decoder abort and drain-error corrections were reproducible
+fixes; IPC-retention and loading failures still required targeted investigation,
 regression coverage, a new candidate, and another strict endurance audit.
+
+## Closed-connection scheduling retention: November 17
+
+A fresh isolated real-site diagnostic reproduced a retained invalid connection
+by the transition from YouTube Music to Facebook. The connection had no client,
+no pending output, empty reply-handler maps, and stopped read/write socket
+monitors. It remained allocated across the following navigation and twelve idle
+observations. The compiler-layout-checked reader found its pointer in the shared
+`SyncMessageState::m_didScheduleDispatchMessagesWorkSet` while its own
+`m_syncState` was already null. This identifies an owning bookkeeping entry;
+the socket-monitor callbacks were not retaining it in this reproduction.
+
+`processIncomingMessage()` adds a strong connection reference to that set and
+schedules `dispatchSyncStateMessages()`. If `invalidate()` clears `m_syncState`
+first, that deferred call returns without removing the entry. Other live
+connections keep the shared state alive, allowing closed connections and their
+receive queues to accumulate. This is a concrete missing cleanup path, beyond
+the earlier correlation between descriptor and thread counts.
+
+The new experimental
+[`sync-state-invalidation-cleanup.patch`](../runtime/webkitgtk-2.52.6/sync-state-invalidation-cleanup.patch)
+removes the invalidated connection from both shared scheduling sets and pending
+message deques before clearing its state. A native regression forces the ordering
+deterministically: the original code retains the connection and bookkeeping,
+whereas the candidate releases them and preserves another connection's message
+delivery. The regression also exercises invalidation from within message dispatch.
+Its build driver preserves independent diagnostic libraries and never modifies
+the existing source/build tree or installed engine.
+
+The candidate runtime is tested separately with the V3 decoder and existing
+libsoup candidate. Its engine and child executable paths are selected consistently
+and verified in `/proc` mappings. The previous background launcher had stopped
+because its long-lived namespace helper was gone. The replacement test launcher
+creates a fresh private mount namespace, mounts a fresh proc view, and drops to
+UID 1000 with no capabilities and `NoNewPrivs`, retaining the WebKit sandbox.
+
+Qualification passed 25 verifier checks, 42 browser integration checks, and 60
+native lifetime cases, including reentrant invalidation. Six control cases
+confirmed the original retention in both deferred-dispatch scenarios and its
+existing behavior during reentrant invalidation. A separate three-round site
+diagnostic verified 51 documents across all seventeen sites. All 52 metadata
+samples had zero retained invalid connections; final UI connections/receive
+threads returned to two, with zero resets and operation timeouts. The site
+diagnostic is explicitly ineligible for the formal endurance gate.
+
+The new strict attempt `20261117-014854` started at 06:48:56 UTC on November 17,
+with the V3 decoder, sandbox enabled, normal mode, the same full site set and
+acceptance gates, and no proactive or network-PSS maintenance recycles. Its
+engine SHA-256 is
+`7f5e12486f7ad620e097a65d7d08d0ad32c2923dcf8222a1a5f02b7c4a197bf8`.
+It has not completed its acceptance period. A separate capture job waits for a
+failed terminal driver verdict or independent audit before collecting document
+resource timing and connection metadata. Resource origins and DOM indices
+correlate pending styles/scripts without recording URL paths, queries, or
+resource bodies. It does not probe a healthy attempt or restart a failed one.
+
+This correction addresses a reproduced resource-retention bug. It does not prove
+that every historical failure had the same cause, and Microsoft document-loading
+stalls remain unproven. Another independently timed full seventeen-site endurance
+run with unchanged strict acceptance gates is still required.

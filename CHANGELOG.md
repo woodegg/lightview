@@ -4,6 +4,10 @@
 
 ### Added
 
+- Add an experimental WebKit IPC invalidation cleanup for closed connections
+  retained in shared synchronous-message scheduling state, with a deterministic
+  native lifetime regression and companion-message/reentrant-dispatch coverage.
+  This runtime correction still requires the full endurance acceptance gate.
 - Add an isolated gst-libav 1.24.1 correction for the decoded-frame metadata
   assertion seen in endurance crashes, with a deterministic aborting control
   and pixel-verified resolution-change regression. The candidate reallocates
