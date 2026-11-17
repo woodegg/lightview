@@ -1,0 +1,17 @@
+--- a/Source/WebKit/NetworkProcess/NetworkResourceLoader.cpp
++++ b/Source/WebKit/NetworkProcess/NetworkResourceLoader.cpp
+@@ -1066,7 +1066,13 @@
+ 
+         if (m_isKeptAlive) {
+             LOADER_RELEASE_LOG("didReceiveResponse: Ignoring response because of keepalive option");
+-            return completionHandler(PolicyAction::Ignore);
++            completionHandler(PolicyAction::Ignore);
++#if USE(SOUP)
++            // Soup clears an ignored request without a completion callback.
++            // Release the detached loader and its closed WebProcess connection.
++            cleanup(LoadResult::Success);
++#endif
++            return;
+         }
+ 
+         LOADER_RELEASE_LOG("didReceiveResponse: Using response");

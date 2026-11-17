@@ -20,13 +20,22 @@
 #define MAX_REQUEST (1024 * 1024)
 #define MAX_RESPONSE (4 * 1024 * 1024)
 #define MAX_CLIENTS 16
-#define LIGHTVIEW_VERSION "0.1.11"
+#define LIGHTVIEW_VERSION "0.1.12-dev"
 #define RECOVERY_TIMEOUT_SECONDS 10
 #define RECOVERY_BURST_SECONDS 300
 #define RECOVERY_BURST_LIMIT 2
 #define RESET_FLASH_SECONDS 5
 #define DEFAULT_KILL_THRESHOLD_MIB 3072
+#define DEFAULT_NETWORK_RECYCLE_THRESHOLD_MIB 0
+#define DEFAULT_NETWORK_THREAD_RECYCLE_THRESHOLD 512
+#define DEFERRED_NAVIGATION_RETRY_MILLISECONDS 50
+#define DEFERRED_NAVIGATION_SETTLE_MILLISECONDS 2000
+#define DEFERRED_NAVIGATION_QUIET_MILLISECONDS 250
+#define NAVIGATION_IN_PLACE_RETRY_LIMIT 2
+#define AUTOMATION_CANCEL_GRACE_MILLISECONDS 1000
+#define AUTOMATION_RELOAD_GRACE_MILLISECONDS 3000
 #define DEFAULT_LEASE_SECONDS 120
+#define DEFAULT_CONTROL_TIMEOUT_SECONDS 60
 #define DEFAULT_IDLE_HIBERNATE_SECONDS 3600
 #define MAX_IDLE_HIBERNATE_SECONDS 86400
 
@@ -51,24 +60,43 @@ typedef struct {
     WebKitMemoryPressureSettings *pressure;
     GSocketService *service;
     GList *page_requests;
-    char *socket_path, *profile_path, *load_error, *download_dir, *download_message;
+    char *socket_path, *profile_path;
+    char *load_error, *download_dir, *download_message;
     char *lease_token;
-    char *last_committed_uri, *last_termination_reason, *last_reset_at;
-    guint clients, memory_limit, memory_kill_threshold, configured_kill_threshold;
+    char *committed_uri, *last_committed_uri, *last_termination_reason, *last_reset_at;
+    char *pending_navigation_uri, *navigation_watchdog_uri;
+    char *deferred_navigation_uri;
+    guint clients, control_timeout_seconds;
+    guint memory_limit, memory_kill_threshold, configured_kill_threshold;
+    guint memory_recycle_threshold, network_recycle_threshold;
+    guint network_thread_recycle_threshold, network_threads;
     guint idle_hibernate_seconds, lease_seconds, hibernate_timer;
     guint downloads_active;
-    guint recovery_timeout, flash_timeout;
+    guint recovery_timeout, flash_timeout, navigation_watchdog, load_watchdog;
+    guint load_probe_timeout;
+    GCancellable *load_probe_cancel;
+    guint deferred_navigation;
+    guint navigation_retry_attempt, navigation_view_rebuild_attempt;
     guint resource_timer, resource_processes;
-    guint64 web_process_generation, reset_count;
-    guint64 memory_pss_kib, previous_cpu_ticks;
+    guint64 web_process_generation, navigation_sequence, reset_count, proactive_recycle_count;
+    guint64 automation_timeout_count, navigation_retry_count;
+    guint64 navigation_view_rebuild_count;
+    guint64 deferred_navigation_generation;
+    guint64 network_process_recycle_count;
+    guint64 load_stop_count;
+    guint64 load_watchdog_epoch;
+    guint64 memory_pss_kib, network_pss_kib, previous_cpu_ticks;
     guint recovery_burst_count;
     gint64 last_recovery_us, previous_cpu_sample_us, last_activity_us, lease_expires_us;
+    gint64 deferred_navigation_deadline_us;
     double cpu_percent;
     int profile_fd;
     EngineState engine_state;
-    gboolean private_mode, low_memory, memory_limit_explicit, browser_cache, no_images;
+    gboolean private_mode, low_memory, memory_limit_explicit, memory_recycle_explicit;
+    gboolean browser_cache, no_images, software_rendering, media_gl_sink_disabled;
     gboolean memory_protection_enabled, sandbox_enabled, hard_reset_used;
     gboolean mode_toggle_syncing, memory_controls_syncing;
+    gboolean current_load_committed, trace_navigation;
 } Browser;
 
 typedef struct {
@@ -77,9 +105,11 @@ typedef struct {
     GCancellable *cancel;
     GCancellable *operation_cancel;
     GString *input;
-    char *output;
-    guint timeout;
-    gboolean quit, page_bound, reset_cancelled;
+    char *output, *page_error;
+    guint timeout, page_error_grace;
+    guint64 page_generation, page_navigation_sequence;
+    gboolean quit, page_bound, reset_cancelled, operation_timed_out, client_counted;
+    gboolean page_navigation_started;
 } Request;
 
 static void process_terminated(WebKitWebView *view,
@@ -90,14 +120,95 @@ static void youtube_navigation_message(WebKitUserContentManager *manager,
     WebKitJavascriptResult *result, gpointer data);
 static void download_started(WebKitWebContext *context, WebKitDownload *download,
     gpointer data);
+static gboolean rebuild_web_view_for_navigation(Browser *b, const char *uri);
 static void hard_engine_reset(Browser *b);
 static gboolean start_reset(Browser *b, const char *source);
 static gboolean switch_low_memory_mode(Browser *b, gboolean enabled);
 static gboolean switch_memory_policy(Browser *b, gboolean enabled, guint threshold);
 static gboolean wake_engine(Browser *b, const char *uri);
+static gboolean navigate(Browser *b, const char *input);
+static void cancel_deferred_navigation(Browser *b);
+static gboolean deferred_navigation_load(gpointer data);
 static void set_idle_hibernate(Browser *b, guint seconds);
 static gboolean switch_profile(Browser *b, const char *path, GError **error);
 static void update_ui(Browser *b);
+
+static char *trace_origin(const char *uri)
+{
+    if (!uri || !*uri) return g_strdup("none");
+    if (g_str_equal(uri, "about:blank")) return g_strdup(uri);
+    g_autoptr(GUri) parsed = g_uri_parse(uri, G_URI_FLAGS_PARSE_RELAXED, NULL);
+    if (!parsed) return g_strdup("invalid");
+    const char *scheme = g_uri_get_scheme(parsed);
+    const char *host = g_uri_get_host(parsed);
+    /* Opt-in traces must not expose URL paths, credentials, queries, or
+     * fragments. Origins are enough to diagnose cross-site navigation. */
+    return host ? g_strdup_printf("%s://%s", scheme ? scheme : "unknown", host) :
+        g_strdup_printf("%s:", scheme ? scheme : "unknown");
+}
+
+static void trace_navigation(Browser *b, const char *phase, const char *uri)
+{
+    if (!b->trace_navigation) return;
+    g_autofree char *origin = trace_origin(uri);
+    g_autofree char *view_origin = trace_origin(
+        b->view ? webkit_web_view_get_uri(b->view) : NULL);
+    g_autofree char *document_origin = trace_origin(b->committed_uri);
+    g_message("Navigation trace: phase=%s origin=%s view=%s document=%s "
+        "sequence=%" G_GUINT64_FORMAT " generation=%" G_GUINT64_FORMAT
+        " loading=%d responsive=%d page=%" G_GUINT64_FORMAT,
+        phase, origin, view_origin, document_origin, b->navigation_sequence,
+        b->web_process_generation,
+        b->view && webkit_web_view_is_loading(b->view),
+        b->view && webkit_web_view_get_is_web_process_responsive(b->view),
+        b->view ? webkit_web_view_get_page_id(b->view) : 0);
+}
+
+static void trace_resource_finished(WebKitWebResource *resource, gpointer data)
+{
+    trace_navigation(data, "main-resource-finished", webkit_web_resource_get_uri(resource));
+}
+
+static void trace_resource_failed(WebKitWebResource *resource, GError *error, gpointer data)
+{
+    trace_navigation(data, "main-resource-failed", webkit_web_resource_get_uri(resource));
+    g_message("Navigation trace: resource=%p error-domain=%s error-code=%d",
+        (gpointer)resource, g_quark_to_string(error->domain), error->code);
+}
+
+static void trace_resource_response(WebKitWebResource *resource, GParamSpec *spec,
+                                    gpointer data)
+{
+    (void)spec;
+    trace_navigation(data, "main-resource-response", webkit_web_resource_get_uri(resource));
+    WebKitURIResponse *response = webkit_web_resource_get_response(resource);
+    if (response) g_message("Navigation trace: resource=%p status=%u",
+        (gpointer)resource, webkit_uri_response_get_status_code(response));
+}
+
+static void trace_resource_started(WebKitWebView *view, WebKitWebResource *resource,
+                                   WebKitURIRequest *request, gpointer data)
+{
+    if (resource != webkit_web_view_get_main_resource(view)) return;
+    trace_navigation(data, "main-resource-started", webkit_uri_request_get_uri(request));
+    g_signal_connect(resource, "finished", G_CALLBACK(trace_resource_finished), data);
+    g_signal_connect(resource, "failed", G_CALLBACK(trace_resource_failed), data);
+    g_signal_connect(resource, "notify::response", G_CALLBACK(trace_resource_response), data);
+}
+
+static gboolean trace_script_dialog(WebKitWebView *view, WebKitScriptDialog *dialog,
+                                     gpointer data)
+{
+    trace_navigation(data, "script-dialog", webkit_web_view_get_uri(view));
+    g_message("Navigation trace: script-dialog-type=%d", webkit_script_dialog_get_dialog_type(dialog));
+    return FALSE;
+}
+
+static void trace_process_responsive(WebKitWebView *view, GParamSpec *spec, gpointer data)
+{
+    (void)spec;
+    trace_navigation(data, "process-responsive-changed", webkit_web_view_get_uri(view));
+}
 
 static void note_activity(Browser *b)
 {
@@ -116,8 +227,35 @@ static gboolean lease_active(Browser *b)
 static gboolean quit_browser(gpointer unused)
 {
     (void)unused;
-    gtk_main_quit();
+    /* A queued control reply can outlive the top-level loop while shutdown is
+     * draining WebKit callbacks. Avoid calling gtk_main_quit() a second time
+     * after the loop has already returned. */
+    if (gtk_main_level() > 0) gtk_main_quit();
     return G_SOURCE_REMOVE;
+}
+
+static void release_client_slot(Request *r)
+{
+    if (!r->client_counted) return;
+    if (r->browser->clients > 0) r->browser->clients--;
+    else g_warning("Control client accounting underflow prevented");
+    r->client_counted = FALSE;
+}
+
+static void queue_active_page_for_recovery(Browser *b)
+{
+    if (b->navigation_watchdog_uri) {
+        g_free(b->pending_navigation_uri);
+        b->pending_navigation_uri = g_strdup(b->navigation_watchdog_uri);
+        return;
+    }
+    if (!b->last_committed_uri ||
+        (!g_str_has_prefix(b->last_committed_uri, "http://") &&
+         !g_str_has_prefix(b->last_committed_uri, "https://") &&
+         !g_str_has_prefix(b->last_committed_uri, "file://")))
+        return;
+    g_free(b->pending_navigation_uri);
+    b->pending_navigation_uri = g_strdup(b->last_committed_uri);
 }
 
 static void request_free(Request *r)
@@ -127,24 +265,98 @@ static void request_free(Request *r)
         r->page_bound = FALSE;
     }
     if (r->timeout) g_source_remove(r->timeout);
+    if (r->page_error_grace) g_source_remove(r->page_error_grace);
     g_io_stream_close(G_IO_STREAM(r->connection), NULL, NULL);
     g_object_unref(r->connection);
     g_object_unref(r->cancel);
     g_object_unref(r->operation_cancel);
     g_string_free(r->input, TRUE);
     g_free(r->output);
-    r->browser->clients--;
+    g_free(r->page_error);
+    release_client_slot(r);
     g_free(r);
+}
+
+static gboolean request_reload_grace_timeout(gpointer data)
+{
+    Request *r = data;
+    r->timeout = 0;
+    if (!r->page_bound) return G_SOURCE_REMOVE;
+    r->browser->page_requests = g_list_remove(r->browser->page_requests, r);
+    r->page_bound = FALSE;
+    r->reset_cancelled = TRUE;
+    /* A cooperative WebKit operation completes its callback as cancelled and
+     * never reaches this fallback. Escalate only when even cancellation cannot
+     * release the page operation, which indicates a genuinely wedged web
+     * process rather than a slow promise or transiently busy page. */
+    if (r->browser->engine_state == ENGINE_READY) {
+        queue_active_page_for_recovery(r->browser);
+        const char *reason = r->page_navigation_started ||
+            r->browser->navigation_sequence != r->page_navigation_sequence ?
+            "automation-navigation-race" : "automation-timeout";
+        g_warning("Timed-out page automation did not cancel; resetting WebKit "
+            "(generation=%" G_GUINT64_FORMAT "->%" G_GUINT64_FORMAT
+            " navigation=%" G_GUINT64_FORMAT "->%" G_GUINT64_FORMAT
+            " load_started=%s loading=%s)",
+            r->page_generation, r->browser->web_process_generation,
+            r->page_navigation_sequence, r->browser->navigation_sequence,
+            r->page_navigation_started ? "yes" : "no",
+            r->browser->view && webkit_web_view_is_loading(r->browser->view) ? "yes" : "no");
+        start_reset(r->browser, reason);
+    }
+    return G_SOURCE_REMOVE;
+}
+
+static gboolean request_cancel_grace_timeout(gpointer data)
+{
+    Request *r = data;
+    r->timeout = 0;
+    if (!r->page_bound) return G_SOURCE_REMOVE;
+    if (r->browser->engine_state != ENGINE_READY || !r->browser->view) {
+        r->reset_cancelled = TRUE;
+        return G_SOURCE_REMOVE;
+    }
+    /* WebKitGTK does not always complete a cancelled async JavaScript call,
+     * notably when it is awaiting a promise that never settles. Replace the
+     * current document before replacing the whole web process: destroying the
+     * JavaScript context releases the callback while retaining the engine,
+     * generation, profile, main process, and control socket. */
+    const char *current = r->browser->last_committed_uri;
+    g_autofree char *uri = g_strdup(current && *current ? current : "about:blank");
+    note_activity(r->browser);
+    g_clear_pointer(&r->browser->load_error, g_free);
+    webkit_web_view_load_uri(r->browser->view, uri);
+    r->timeout = g_timeout_add(AUTOMATION_RELOAD_GRACE_MILLISECONDS,
+        request_reload_grace_timeout, r);
+    g_message("Timed-out page automation did not cancel; reloading the current "
+        "document before considering a WebKit reset");
+    return G_SOURCE_REMOVE;
 }
 
 static gboolean request_timeout(gpointer data)
 {
     Request *r = data;
     r->timeout = 0;
+    if (!r->page_bound) {
+        g_cancellable_cancel(r->cancel);
+        return G_SOURCE_REMOVE;
+    }
+    r->browser->automation_timeout_count++;
+    if (r->browser->engine_state != ENGINE_READY) {
+        r->reset_cancelled = TRUE;
+        g_cancellable_cancel(r->operation_cancel);
+        return G_SOURCE_REMOVE;
+    }
+    r->operation_timed_out = TRUE;
     g_cancellable_cancel(r->operation_cancel);
-    g_cancellable_cancel(r->cancel);
-    g_io_stream_close(G_IO_STREAM(r->connection), NULL, NULL);
-    /* The pending read, JavaScript, or write callback releases the request. */
+    r->timeout = g_timeout_add(AUTOMATION_CANCEL_GRACE_MILLISECONDS,
+        request_cancel_grace_timeout, r);
+    g_message("Page-bound automation timed out; cancellation requested "
+        "(generation=%" G_GUINT64_FORMAT " navigation=%" G_GUINT64_FORMAT
+        " load_started=%s loading=%s)",
+        r->page_generation, r->page_navigation_sequence,
+        r->page_navigation_started ? "yes" : "no",
+        r->browser->view && webkit_web_view_is_loading(r->browser->view) ? "yes" : "no");
     return G_SOURCE_REMOVE;
 }
 
@@ -192,8 +404,14 @@ static void reply(Request *r, JsonNode *value, const char *error)
     reply_full(r, value, error, NULL, FALSE);
 }
 
-static void reply_engine_unavailable(Request *r)
+static void reply_engine_unavailable(Request *r, const Browser *b)
 {
+    if (b->engine_state == ENGINE_FAILED) {
+        reply_full(r, NULL,
+            b->load_error ? b->load_error : "WebKit recovery failed; reset is required",
+            "webkit_failed", FALSE);
+        return;
+    }
     reply_full(r, NULL, "WebKit engine is recovering; retry when engine_state is ready",
         "webkit_recovering", TRUE);
 }
@@ -255,6 +473,31 @@ static const char *running_mode_short_name(const Browser *b)
     return "N";
 }
 
+static gboolean environment_truthy(const char *value)
+{
+    return value && *value &&
+        !g_str_equal(value, "0") &&
+        g_ascii_strcasecmp(value, "false") != 0 &&
+        g_ascii_strcasecmp(value, "no") != 0;
+}
+
+static gboolean has_accessible_drm_render_node(void)
+{
+    g_autoptr(GDir) directory = g_dir_open("/dev/dri", 0, NULL);
+    if (!directory) return FALSE;
+
+    const char *name;
+    while ((name = g_dir_read_name(directory))) {
+        if (!g_str_has_prefix(name, "renderD")) continue;
+        g_autofree char *path = g_build_filename("/dev/dri", name, NULL);
+        int fd = g_open(path, O_RDWR | O_CLOEXEC, 0);
+        if (fd < 0) continue;
+        close(fd);
+        return TRUE;
+    }
+    return FALSE;
+}
+
 static guint64 process_pss_kib(pid_t pid)
 {
     g_autofree char *path = g_strdup_printf("/proc/%ld/smaps_rollup", (long)pid);
@@ -279,6 +522,18 @@ static guint64 process_pss_kib(pid_t pid)
             return pages * (guint64)sysconf(_SC_PAGESIZE) / 1024;
         }
     }
+    return 0;
+}
+
+static guint process_threads(pid_t pid)
+{
+    g_autofree char *path = g_strdup_printf("/proc/%ld/status", (long)pid);
+    g_autofree char *contents = NULL;
+    if (!g_file_get_contents(path, &contents, NULL, NULL)) return 0;
+    g_auto(GStrv) lines = g_strsplit(contents, "\n", -1);
+    for (guint i = 0; lines[i]; i++)
+        if (g_str_has_prefix(lines[i], "Threads:"))
+            return (guint)g_ascii_strtoull(lines[i] + 8, NULL, 10);
     return 0;
 }
 
@@ -327,6 +582,168 @@ static void collect_process_tree(pid_t pid, GHashTable *seen, guint64 *pss_kib,
     }
 }
 
+static guint terminate_network_processes(void)
+{
+    g_autofree char *path = g_strdup_printf("/proc/%ld/task/%ld/children",
+        (long)getpid(), (long)getpid());
+    g_autofree char *contents = NULL;
+    if (!g_file_get_contents(path, &contents, NULL, NULL)) return 0;
+
+    guint terminated = 0;
+    g_auto(GStrv) children = g_strsplit_set(contents, " \t\n", -1);
+    for (guint i = 0; children[i]; i++) {
+        if (!*children[i]) continue;
+        gint64 child = g_ascii_strtoll(children[i], NULL, 10);
+        if (child <= 0 || child > G_MAXINT) continue;
+        g_autofree char *comm_path = g_strdup_printf("/proc/%" G_GINT64_FORMAT "/comm",
+            child);
+        g_autofree char *comm = NULL;
+        if (!g_file_get_contents(comm_path, &comm, NULL, NULL)) continue;
+        g_strchomp(comm);
+        /* Linux truncates comm to TASK_COMM_LEN, so WebKitNetworkProcess is
+         * normally reported as WebKitNetworkPr. Only inspect direct children
+         * spawned by this Lightview process before sending the signal. */
+        if (!g_str_has_prefix(comm, "WebKitNetwork")) continue;
+        if (kill((pid_t)child, SIGKILL) == 0) terminated++;
+        else if (errno != ESRCH)
+            g_warning("Unable to terminate WebKit network process %" G_GINT64_FORMAT
+                ": %s", child, g_strerror(errno));
+    }
+    return terminated;
+}
+
+static guint64 network_process_pss_kib(void)
+{
+    g_autofree char *path = g_strdup_printf("/proc/%ld/task/%ld/children",
+        (long)getpid(), (long)getpid());
+    g_autofree char *contents = NULL;
+    if (!g_file_get_contents(path, &contents, NULL, NULL)) return 0;
+
+    guint64 pss_kib = 0;
+    g_auto(GStrv) children = g_strsplit_set(contents, " \t\n", -1);
+    for (guint i = 0; children[i]; i++) {
+        if (!*children[i]) continue;
+        gint64 child = g_ascii_strtoll(children[i], NULL, 10);
+        if (child <= 0 || child > G_MAXINT) continue;
+        g_autofree char *comm_path = g_strdup_printf("/proc/%" G_GINT64_FORMAT "/comm",
+            child);
+        g_autofree char *comm = NULL;
+        if (!g_file_get_contents(comm_path, &comm, NULL, NULL)) continue;
+        g_strchomp(comm);
+        if (g_str_has_prefix(comm, "WebKitNetwork"))
+            pss_kib += process_pss_kib((pid_t)child);
+    }
+    return pss_kib;
+}
+
+static guint network_process_threads(void)
+{
+    g_autofree char *path = g_strdup_printf("/proc/%ld/task/%ld/children",
+        (long)getpid(), (long)getpid());
+    g_autofree char *contents = NULL;
+    if (!g_file_get_contents(path, &contents, NULL, NULL)) return 0;
+
+    guint threads = 0;
+    g_auto(GStrv) children = g_strsplit_set(contents, " \t\n", -1);
+    for (guint i = 0; children[i]; i++) {
+        if (!*children[i]) continue;
+        gint64 child = g_ascii_strtoll(children[i], NULL, 10);
+        if (child <= 0 || child > G_MAXINT) continue;
+        g_autofree char *comm_path = g_strdup_printf("/proc/%" G_GINT64_FORMAT "/comm",
+            child);
+        g_autofree char *comm = NULL;
+        if (!g_file_get_contents(comm_path, &comm, NULL, NULL)) continue;
+        g_strchomp(comm);
+        if (g_str_has_prefix(comm, "WebKitNetwork"))
+            threads += process_threads((pid_t)child);
+    }
+    return threads;
+}
+
+static void drain_main_context_for(guint milliseconds)
+{
+    gint64 deadline = g_get_monotonic_time() +
+        (gint64)milliseconds * G_TIME_SPAN_MILLISECOND;
+    while (g_get_monotonic_time() < deadline) {
+        while (g_main_context_pending(NULL))
+            g_main_context_iteration(NULL, FALSE);
+        g_usleep(1000);
+    }
+}
+
+static guint terminate_network_processes_for_reset(Browser *b)
+{
+    guint network_processes = terminate_network_processes();
+    if (!network_processes) return 0;
+    b->network_process_recycle_count++;
+    g_message("Terminated %u WebKit network process%s during engine reset",
+        network_processes, network_processes == 1 ? "" : "es");
+    return network_processes;
+}
+
+static void terminate_web_process_for_reset(Browser *b)
+{
+    if (b->engine_state == ENGINE_RESETTING && b->view)
+        webkit_web_view_terminate_web_process(b->view);
+}
+
+typedef struct {
+    Browser *browser;
+    GList *cookies;
+} NetworkCookieRestore;
+
+static void network_cookies_restored(GObject *source, GAsyncResult *result,
+                                     gpointer data)
+{
+    NetworkCookieRestore *restore = data;
+    g_autoptr(GError) error = NULL;
+    webkit_cookie_manager_replace_cookies_finish(
+        WEBKIT_COOKIE_MANAGER(source), result, &error);
+    if (error)
+        g_warning("Unable to restore cookies after WebKit network recycle: %s",
+            error->message);
+    g_list_free_full(restore->cookies, (GDestroyNotify)soup_cookie_free);
+    terminate_web_process_for_reset(restore->browser);
+    g_free(restore);
+}
+
+static void network_cookies_snapshotted(GObject *source, GAsyncResult *result,
+                                        gpointer data)
+{
+    Browser *b = data;
+    g_autoptr(GError) error = NULL;
+    GList *cookies = webkit_cookie_manager_get_all_cookies_finish(
+        WEBKIT_COOKIE_MANAGER(source), result, &error);
+    if (b->engine_state != ENGINE_RESETTING) {
+        g_list_free_full(cookies, (GDestroyNotify)soup_cookie_free);
+        return;
+    }
+    if (error) {
+        g_warning("Skipping WebKit network recycle because cookies could not be saved: %s",
+            error->message);
+        terminate_web_process_for_reset(b);
+        return;
+    }
+    if (!terminate_network_processes_for_reset(b)) {
+        g_list_free_full(cookies, (GDestroyNotify)soup_cookie_free);
+        terminate_web_process_for_reset(b);
+        return;
+    }
+    /* An empty profile legitimately has no cookies. WebKit's replace API
+     * requires a non-NULL list, so continue the reset directly instead of
+     * waiting forever for a callback that will never be scheduled. */
+    if (!cookies) {
+        terminate_web_process_for_reset(b);
+        return;
+    }
+
+    NetworkCookieRestore *restore = g_new0(NetworkCookieRestore, 1);
+    restore->browser = b;
+    restore->cookies = cookies;
+    webkit_cookie_manager_replace_cookies(WEBKIT_COOKIE_MANAGER(source), cookies,
+        NULL, network_cookies_restored, restore);
+}
+
 static gboolean sample_resource_usage(gpointer data)
 {
     Browser *b = data;
@@ -343,11 +760,25 @@ static gboolean sample_resource_usage(gpointer data)
             ((double)ticks_per_second * elapsed);
     } else b->cpu_percent = 0.0;
     b->memory_pss_kib = pss_kib;
+    b->network_pss_kib = network_process_pss_kib();
+    b->network_threads = network_process_threads();
     b->resource_processes = processes;
     b->previous_cpu_ticks = cpu_ticks;
     b->previous_cpu_sample_us = now;
     update_ui(b);
     return G_SOURCE_CONTINUE;
+}
+
+static void refresh_memory_usage(Browser *b)
+{
+    g_autoptr(GHashTable) seen = g_hash_table_new(g_direct_hash, g_direct_equal);
+    guint64 pss_kib = 0, ignored_cpu_ticks = 0;
+    guint processes = 0;
+    collect_process_tree(getpid(), seen, &pss_kib, &ignored_cpu_ticks, &processes);
+    b->memory_pss_kib = pss_kib;
+    b->network_pss_kib = network_process_pss_kib();
+    b->network_threads = network_process_threads();
+    b->resource_processes = processes;
 }
 
 static void update_ui(Browser *b)
@@ -430,6 +861,202 @@ static gboolean note_view_input(GtkWidget *widget, GdkEvent *event, gpointer dat
     return FALSE;
 }
 
+static void cancel_navigation_watchdog(Browser *b)
+{
+    if (b->navigation_watchdog) {
+        g_source_remove(b->navigation_watchdog);
+        b->navigation_watchdog = 0;
+    }
+    g_clear_pointer(&b->navigation_watchdog_uri, g_free);
+}
+
+static void cancel_deferred_navigation(Browser *b)
+{
+    if (b->deferred_navigation) {
+        g_source_remove(b->deferred_navigation);
+        b->deferred_navigation = 0;
+    }
+    g_clear_pointer(&b->deferred_navigation_uri, g_free);
+    b->deferred_navigation_deadline_us = 0;
+}
+
+static void cancel_load_watchdog(Browser *b)
+{
+    b->load_watchdog_epoch++;
+    if (b->load_watchdog) g_source_remove(b->load_watchdog);
+    b->load_watchdog = 0;
+    if (b->load_probe_timeout) g_source_remove(b->load_probe_timeout);
+    b->load_probe_timeout = 0;
+    if (b->load_probe_cancel) g_cancellable_cancel(b->load_probe_cancel);
+    g_clear_object(&b->load_probe_cancel);
+}
+
+static guint load_watchdog_seconds(const Browser *b)
+{
+    return MAX(5U, b->control_timeout_seconds / 2);
+}
+
+static void arm_load_watchdog(Browser *b);
+
+typedef struct {
+    Browser *browser;
+    guint64 epoch;
+} LoadProbe;
+
+static gboolean load_probe_expired(gpointer data)
+{
+    Browser *b = data;
+    b->load_probe_timeout = 0;
+    if (b->load_probe_cancel) g_cancellable_cancel(b->load_probe_cancel);
+    return G_SOURCE_REMOVE;
+}
+
+static void load_probe_done(GObject *object, GAsyncResult *result, gpointer data)
+{
+    LoadProbe *probe = data;
+    Browser *b = probe->browser;
+    guint64 epoch = probe->epoch;
+    g_free(probe);
+    g_autoptr(GError) error = NULL;
+    g_autoptr(JSCValue) value = webkit_web_view_evaluate_javascript_finish(
+        WEBKIT_WEB_VIEW(object), result, &error);
+    if (epoch != b->load_watchdog_epoch || WEBKIT_WEB_VIEW(object) != b->view)
+        return;
+    if (b->load_probe_timeout) g_source_remove(b->load_probe_timeout);
+    b->load_probe_timeout = 0;
+    g_clear_object(&b->load_probe_cancel);
+    if (b->engine_state != ENGINE_READY || !b->current_load_committed ||
+        !webkit_web_view_is_loading(b->view))
+        return;
+
+    /* COMMITTED only means response data has started arriving. Cancelling
+     * while a stylesheet or deferred script still blocks parsing can leave
+     * the document permanently stuck at a head with no body. Stop remaining
+     * subresources only after DOMContentLoaded, and keep an inconclusive or
+     * cancelled probe bounded without using it to reset the page process. */
+    if (!value || !jsc_value_is_boolean(value) || !jsc_value_to_boolean(value)) {
+        arm_load_watchdog(b);
+        return;
+    }
+    b->load_stop_count++;
+    g_warning("Page load exceeded the %u-second automation budget; stopping remaining "
+        "resources after DOMContentLoaded without resetting WebKit", load_watchdog_seconds(b));
+    webkit_web_view_stop_loading(b->view);
+    note_activity(b);
+    update_ui(b);
+}
+
+static gboolean load_watchdog_expired(gpointer data)
+{
+    Browser *b = data;
+    b->load_watchdog = 0;
+    if (b->engine_state != ENGINE_READY || !b->view ||
+        !webkit_web_view_is_loading(b->view))
+        return G_SOURCE_REMOVE;
+
+    /* Only stop subresources for a document that has already committed. An
+     * uncommitted main-resource request is owned by the navigation watchdog;
+     * stopping it here guarantees that it cannot commit and turns a slow
+     * navigation into an unnecessary engine reset. */
+    if (!b->current_load_committed)
+        return G_SOURCE_REMOVE;
+
+    LoadProbe *probe = g_new0(LoadProbe, 1);
+    probe->browser = b;
+    probe->epoch = b->load_watchdog_epoch;
+    b->load_probe_cancel = g_cancellable_new();
+    b->load_probe_timeout = g_timeout_add_seconds(5, load_probe_expired, b);
+    webkit_web_view_evaluate_javascript(b->view,
+        "document.readyState !== 'loading' && !!document.body && "
+        "(document.readyState === 'complete' || "
+        "performance.getEntriesByType('navigation').some(e => e.domContentLoadedEventEnd > 0))",
+        -1, "lightview-load-watchdog", NULL, b->load_probe_cancel, load_probe_done, probe);
+    return G_SOURCE_REMOVE;
+}
+
+static void arm_load_watchdog(Browser *b)
+{
+    cancel_load_watchdog(b);
+    b->load_watchdog = g_timeout_add_seconds(load_watchdog_seconds(b),
+        load_watchdog_expired, b);
+}
+
+static gboolean navigation_watchdog_expired(gpointer data)
+{
+    Browser *b = data;
+    trace_navigation(b, "watchdog-expired", b->navigation_watchdog_uri);
+    b->navigation_watchdog = 0;
+    if (b->engine_state != ENGINE_READY || !b->navigation_watchdog_uri) {
+        g_clear_pointer(&b->navigation_watchdog_uri, g_free);
+        return G_SOURCE_REMOVE;
+    }
+
+    g_autofree char *uri = g_steal_pointer(&b->navigation_watchdog_uri);
+    if (b->navigation_retry_attempt < NAVIGATION_IN_PLACE_RETRY_LIMIT) {
+        b->navigation_retry_attempt++;
+        b->navigation_retry_count++;
+        g_warning("Navigation did not commit; parking on a local document and "
+            "retrying in the retained WebKit process (attempt %u/%u)",
+            b->navigation_retry_attempt, NAVIGATION_IN_PLACE_RETRY_LIMIT);
+        cancel_deferred_navigation(b);
+        cancel_load_watchdog(b);
+        b->deferred_navigation_uri = g_steal_pointer(&uri);
+        b->deferred_navigation_generation = b->web_process_generation;
+        b->deferred_navigation_deadline_us = g_get_monotonic_time() +
+            (gint64)DEFERRED_NAVIGATION_SETTLE_MILLISECONDS * G_TIME_SPAN_MILLISECOND;
+        b->deferred_navigation = g_timeout_add(
+            DEFERRED_NAVIGATION_RETRY_MILLISECONDS,
+            deferred_navigation_load, b);
+        /* Reissuing a remote URI immediately after stop_loading() can leave
+         * every retry attached to the same permanently provisional load. A
+         * deterministic local document supersedes that request without an
+         * explicit cancellation race. LOAD_FINISHED then gives WebKit a quiet
+         * main-loop turn before deferred_navigation_load() sends the retained
+         * destination. This keeps the WebView, control connection, profile,
+         * and WebKit process alive while still escaping the wedged load. */
+        webkit_web_view_load_html(b->view,
+            "<!doctype html><meta charset=\"utf-8\"><title></title>",
+            "about:blank");
+        note_activity(b);
+        update_ui(b);
+        return G_SOURCE_REMOVE;
+    }
+
+    if (!b->navigation_view_rebuild_attempt) {
+        b->navigation_view_rebuild_attempt = 1;
+        if (rebuild_web_view_for_navigation(b, uri))
+            return G_SOURCE_REMOVE;
+        g_warning("Unable to rebuild the WebView for navigation recovery; "
+            "escalating to a WebKit reset");
+    }
+
+    g_free(b->pending_navigation_uri);
+    b->pending_navigation_uri = g_steal_pointer(&uri);
+    b->navigation_retry_attempt = 0;
+    g_warning("Navigation did not commit after an in-place retry and WebView "
+        "rebuild; resetting WebKit and replaying the destination");
+    start_reset(b, "navigation-timeout");
+    return G_SOURCE_REMOVE;
+}
+
+static void arm_navigation_watchdog(Browser *b, const char *uri)
+{
+    cancel_navigation_watchdog(b);
+    b->navigation_watchdog_uri = g_strdup(uri);
+    trace_navigation(b, "dispatch", uri);
+    /* A slow but healthy remote server must receive the full configured
+     * operation budget before recovery begins. Using half of that budget for
+     * the first attempt caused occasional 30--60 second major-site commits to
+     * be cancelled and misclassified as wedged WebProcesses. A retry gets half
+     * a budget; genuinely stuck content still progresses through the bounded
+     * retry/rebuild/reset sequence. */
+    guint seconds = b->navigation_retry_attempt ?
+        MAX(5U, b->control_timeout_seconds / 2) :
+        MAX(5U, b->control_timeout_seconds);
+    b->navigation_watchdog = g_timeout_add_seconds(seconds,
+        navigation_watchdog_expired, b);
+}
+
 static void complete_recovery(Browser *b)
 {
     if (b->recovery_timeout) {
@@ -438,19 +1065,93 @@ static void complete_recovery(Browser *b)
     }
     b->engine_state = ENGINE_READY;
     b->hard_reset_used = FALSE;
+    /* A replacement engine that reached a finished blank document recovered
+     * successfully. Do not treat later, independent page failures as one
+     * continuous restart loop. Failures during recovery are bounded in
+     * process_terminated() before this point. */
+    b->recovery_burst_count = 0;
+    b->last_recovery_us = 0;
     b->web_process_generation++;
     note_activity(b);
     g_clear_pointer(&b->load_error, g_free);
     g_message("WebKit recovery ready: generation=%" G_GUINT64_FORMAT
         " reset_count=%" G_GUINT64_FORMAT, b->web_process_generation, b->reset_count);
     update_ui(b);
+    if (b->pending_navigation_uri) {
+        g_autofree char *uri = g_steal_pointer(&b->pending_navigation_uri);
+        note_activity(b);
+        g_clear_pointer(&b->load_error, g_free);
+        arm_navigation_watchdog(b, uri);
+        webkit_web_view_load_uri(b->view, uri);
+    }
+}
+
+static const char *skip_www(const char *host)
+{
+    return host && g_ascii_strncasecmp(host, "www.", 4) == 0 ? host + 4 : host;
+}
+
+static gboolean navigation_target_matches(const char *expected, const char *actual)
+{
+    if (!expected || !actual) return FALSE;
+    if (g_str_equal(expected, actual)) return TRUE;
+    g_autoptr(GError) expected_error = NULL;
+    g_autoptr(GError) actual_error = NULL;
+    g_autoptr(GUri) expected_uri = g_uri_parse(expected, G_URI_FLAGS_NONE, &expected_error);
+    g_autoptr(GUri) actual_uri = g_uri_parse(actual, G_URI_FLAGS_NONE, &actual_error);
+    if (!expected_uri || !actual_uri) return FALSE;
+    const char *expected_scheme = g_uri_get_scheme(expected_uri);
+    const char *actual_scheme = g_uri_get_scheme(actual_uri);
+    const char *expected_host = skip_www(g_uri_get_host(expected_uri));
+    const char *actual_host = skip_www(g_uri_get_host(actual_uri));
+    if (!expected_scheme || !actual_scheme || !expected_host || !actual_host ||
+        (g_ascii_strcasecmp(expected_scheme, "http") != 0 &&
+         g_ascii_strcasecmp(expected_scheme, "https") != 0) ||
+        (g_ascii_strcasecmp(actual_scheme, "http") != 0 &&
+         g_ascii_strcasecmp(actual_scheme, "https") != 0))
+        return FALSE;
+    if (g_ascii_strcasecmp(expected_host, actual_host) == 0) return TRUE;
+    g_autofree char *expected_suffix = g_strconcat(".", expected_host, NULL);
+    g_autofree char *actual_suffix = g_strconcat(".", actual_host, NULL);
+    return g_str_has_suffix(actual_host, expected_suffix) ||
+           g_str_has_suffix(expected_host, actual_suffix);
 }
 
 static void load_changed(WebKitWebView *view, WebKitLoadEvent event, gpointer data)
 {
     Browser *b = data;
+    const char *phase = event == WEBKIT_LOAD_STARTED ? "load-started" :
+        event == WEBKIT_LOAD_REDIRECTED ? "load-redirected" :
+        event == WEBKIT_LOAD_COMMITTED ? "load-committed" : "load-finished";
+    trace_navigation(b, phase, webkit_web_view_get_uri(view));
     if (event == WEBKIT_LOAD_STARTED || event == WEBKIT_LOAD_FINISHED) note_activity(b);
-    if (event == WEBKIT_LOAD_STARTED) g_clear_pointer(&b->load_error, g_free);
+    if (event == WEBKIT_LOAD_STARTED) {
+        b->current_load_committed = FALSE;
+        if (b->engine_state == ENGINE_READY) arm_load_watchdog(b);
+        g_clear_pointer(&b->load_error, g_free);
+        for (GList *item = b->page_requests; item; item = item->next) {
+            Request *request = item->data;
+            request->page_navigation_started = TRUE;
+        }
+    }
+    if (event == WEBKIT_LOAD_FINISHED && !webkit_web_view_is_loading(view))
+        cancel_load_watchdog(b);
+    if (event == WEBKIT_LOAD_COMMITTED) {
+        b->current_load_committed = TRUE;
+        const char *uri = webkit_web_view_get_uri(view);
+        g_free(b->committed_uri);
+        b->committed_uri = g_strdup(uri);
+        /* A cancelled page can emit a late commit after a newer open request.
+         * Do not let that stale cross-site event disarm the watchdog for the
+         * destination that automation is actually waiting for. */
+        if (b->navigation_watchdog_uri &&
+            navigation_target_matches(b->navigation_watchdog_uri, uri)) {
+            cancel_navigation_watchdog(b);
+            b->navigation_retry_attempt = 0;
+            b->navigation_view_rebuild_attempt = 0;
+        }
+        b->navigation_sequence++;
+    }
     if (event == WEBKIT_LOAD_COMMITTED && b->engine_state == ENGINE_READY) {
         const char *uri = webkit_web_view_get_uri(view);
         if (uri && *uri) {
@@ -460,16 +1161,43 @@ static void load_changed(WebKitWebView *view, WebKitLoadEvent event, gpointer da
     }
     if (event == WEBKIT_LOAD_FINISHED && b->engine_state == ENGINE_RECOVERING)
         complete_recovery(b);
+    if (event == WEBKIT_LOAD_FINISHED && b->engine_state == ENGINE_READY &&
+        b->deferred_navigation_uri) {
+        /* Dispatch as soon as the cancelled document is actually idle. This
+         * is more reliable than assuming a fixed delay is long enough for a
+         * busy page's late cancellation callbacks to drain. */
+        if (b->deferred_navigation) g_source_remove(b->deferred_navigation);
+        /* LOAD_FINISHED means WebKit is idle, but late cancellation callbacks
+         * can still be queued in the same main-loop turn. Give them a short
+         * quiet window before dispatching the replacement document. */
+        b->deferred_navigation = g_timeout_add(
+            DEFERRED_NAVIGATION_QUIET_MILLISECONDS,
+            deferred_navigation_load, b);
+    }
     update_ui(b);
 }
 
 static gboolean load_failed(WebKitWebView *view, WebKitLoadEvent event,
                             const char *uri, GError *error, gpointer data)
 {
-    (void)view; (void)event; (void)uri;
     Browser *b = data;
+    trace_navigation(b, "load-failed", uri);
+    if (b->trace_navigation) g_message("Navigation trace: load-event=%d error-domain=%s error-code=%d",
+        event, g_quark_to_string(error->domain), error->code);
+    /* Standalone media first replaces its preliminary resource load with a
+     * media document. Keep supervising that navigation until the media
+     * document commits; this handoff is not a page failure. */
+    if (g_error_matches(error, WEBKIT_PLUGIN_ERROR, WEBKIT_PLUGIN_ERROR_WILL_HANDLE_LOAD))
+        return TRUE;
+    /* A cancelled old navigation may report failure after a replacement load
+     * has already started. Do not let that stale callback disarm the new
+     * load's budget. */
+    if (!webkit_web_view_is_loading(view)) cancel_load_watchdog(b);
     if (g_error_matches(error, WEBKIT_NETWORK_ERROR, WEBKIT_NETWORK_ERROR_CANCELLED))
         return TRUE;
+    cancel_navigation_watchdog(b);
+    b->navigation_retry_attempt = 0;
+    b->navigation_view_rebuild_attempt = 0;
     g_free(b->load_error);
     b->load_error = g_strdup(error->message);
     update_ui(b);
@@ -609,6 +1337,7 @@ static void set_recovery_failure(Browser *b, const char *message)
         b->recovery_timeout = 0;
     }
     b->engine_state = ENGINE_FAILED;
+    g_clear_pointer(&b->pending_navigation_uri, g_free);
     g_free(b->load_error);
     b->load_error = g_strdup(message);
     g_warning("WebKit recovery failed: %s", message);
@@ -652,6 +1381,11 @@ static gboolean start_reset(Browser *b, const char *source)
     if (b->engine_state == ENGINE_RESETTING || b->engine_state == ENGINE_RECOVERING)
         return FALSE;
     cancel_page_requests(b);
+    cancel_navigation_watchdog(b);
+    cancel_deferred_navigation(b);
+    b->navigation_retry_attempt = 0;
+    b->navigation_view_rebuild_attempt = 0;
+    cancel_load_watchdog(b);
     b->recovery_burst_count = 0;
     b->last_recovery_us = 0;
     record_reset(b, source ? source : "requested");
@@ -673,9 +1407,15 @@ static void process_terminated(WebKitWebView *view, WebKitWebProcessTerminationR
 {
     Browser *b = data;
     if (view != b->view) return;
+    g_clear_pointer(&b->committed_uri, g_free);
     const char *reason_name = termination_reason_name(reason);
-    g_free(b->last_termination_reason);
-    b->last_termination_reason = g_strdup(reason_name);
+    /* Keep the explicit reset source for operator/automation diagnostics. An
+     * expected terminate-by-API callback otherwise hides memory-maintenance or
+     * toolbar-request behind a generic termination reason. */
+    if (b->engine_state != ENGINE_RESETTING) {
+        g_free(b->last_termination_reason);
+        b->last_termination_reason = g_strdup(reason_name);
+    }
     g_warning("WebKit web process terminated: reason=%s state=%s", reason_name,
         engine_state_name(b->engine_state));
 
@@ -701,6 +1441,10 @@ static void process_terminated(WebKitWebView *view, WebKitWebProcessTerminationR
     else b->recovery_burst_count = 1;
     b->last_recovery_us = now;
     cancel_page_requests(b);
+    /* Unexpected WebKit termination must not silently discard the active
+     * page. Recover through a known-good blank document, then replay the last
+     * committed top-level URL while retaining the Lightview process/socket. */
+    queue_active_page_for_recovery(b);
     record_reset(b, reason_name);
     if (b->recovery_burst_count > RECOVERY_BURST_LIMIT) {
         set_recovery_failure(b, "WebKit stopped repeatedly; automatic recovery was bounded.");
@@ -728,13 +1472,134 @@ static char *normalize_uri(const char *input)
     return g_strconcat("https://", input, NULL);
 }
 
+static gboolean deferred_navigation_load(gpointer data)
+{
+    Browser *b = data;
+    b->deferred_navigation = 0;
+    if (!b->deferred_navigation_uri || b->engine_state != ENGINE_READY || !b->view ||
+        b->web_process_generation != b->deferred_navigation_generation) {
+        g_clear_pointer(&b->deferred_navigation_uri, g_free);
+        b->deferred_navigation_deadline_us = 0;
+        return G_SOURCE_REMOVE;
+    }
+    if (webkit_web_view_is_loading(b->view) &&
+        b->deferred_navigation_deadline_us > g_get_monotonic_time()) {
+        b->deferred_navigation = g_timeout_add(
+            DEFERRED_NAVIGATION_RETRY_MILLISECONDS,
+            deferred_navigation_load, b);
+        return G_SOURCE_REMOVE;
+    }
+    g_autofree char *uri = g_steal_pointer(&b->deferred_navigation_uri);
+    b->deferred_navigation_deadline_us = 0;
+    note_activity(b);
+    g_clear_pointer(&b->load_error, g_free);
+    arm_navigation_watchdog(b, uri);
+    webkit_web_view_load_uri(b->view, uri);
+    return G_SOURCE_REMOVE;
+}
+
 static gboolean navigate(Browser *b, const char *input)
 {
     if (b->engine_state != ENGINE_READY || !b->view) return FALSE;
     g_autofree char *uri = normalize_uri(input);
     if (!uri) return FALSE;
+    cancel_navigation_watchdog(b);
+    cancel_deferred_navigation(b);
+    /* Recovery attempts belong to one explicit top-level navigation. A fresh
+     * command gets its own retry/rebuild budget; a rebuilt view dispatches the
+     * retained destination directly and therefore keeps these flags set. */
+    b->navigation_retry_attempt = 0;
+    b->navigation_view_rebuild_attempt = 0;
+    /* A committed page can keep its subresource load alive indefinitely. Its
+     * watchdog must not survive an explicit open request: otherwise the old
+     * timer can expire while the replacement main resource is provisional
+     * and stop the new navigation. WEBKIT_LOAD_STARTED arms a fresh budget
+     * for the replacement. */
+    cancel_load_watchdog(b);
+    /* The UI sampler runs every two seconds. Heavy pages can grow by hundreds
+     * of MiB between its last tick and the next automation navigation, so a
+     * cached value can miss the maintenance threshold or retain a pre-reset
+     * high-water mark. Take a current process-tree sample at the decision
+     * point; this keeps proactive recycle ahead of WebKit's last-resort kill. */
+    if (b->memory_recycle_threshold || b->network_recycle_threshold ||
+        b->network_thread_recycle_threshold)
+        refresh_memory_usage(b);
+    gboolean network_memory_limit_reached = b->network_recycle_threshold &&
+        b->network_pss_kib >= (guint64)b->network_recycle_threshold * 1024;
+    gboolean network_thread_limit_reached = b->network_thread_recycle_threshold &&
+        b->network_threads >= b->network_thread_recycle_threshold;
+    if ((network_memory_limit_reached || network_thread_limit_reached) &&
+        !b->downloads_active && !b->page_requests &&
+        !g_str_equal(uri, "about:blank")) {
+        guint recycled = terminate_network_processes();
+        if (recycled) {
+            b->network_process_recycle_count++;
+            g_message("Proactive WebKit network-only recycle at %.2f MiB PSS and "
+                "%u threads (limits: %u MiB, %u threads); preserving page "
+                "process and generation",
+                (double)b->network_pss_kib / 1024.0,
+                b->network_threads, b->network_recycle_threshold,
+                b->network_thread_recycle_threshold);
+            /* Let WebKit observe the helper's exit before asking the retained
+             * WebProcess to start a new load. Issuing both in the same main
+             * loop dispatch can race the network crash notification and make
+             * the navigation fail with an internal network error. */
+            drain_main_context_for(250);
+            b->network_pss_kib = network_process_pss_kib();
+            b->network_threads = network_process_threads();
+        }
+    }
+    if (b->memory_recycle_threshold &&
+        b->memory_pss_kib >= (guint64)b->memory_recycle_threshold * 1024 &&
+        !b->downloads_active && !b->page_requests &&
+        !g_str_equal(uri, "about:blank")) {
+        g_free(b->pending_navigation_uri);
+        b->pending_navigation_uri = g_steal_pointer(&uri);
+        b->recovery_burst_count = 0;
+        b->last_recovery_us = 0;
+        b->proactive_recycle_count++;
+        record_reset(b, "memory-maintenance");
+        g_message("Proactive WebKit recycle at %.2f MiB PSS (threshold %u MiB)",
+            (double)b->memory_pss_kib / 1024.0, b->memory_recycle_threshold);
+        b->engine_state = ENGINE_RESETTING;
+        arm_recovery_timeout(b);
+        update_ui(b);
+        /* Snapshot cookies before the network process is terminated, then
+         * restore them through the retained data manager before replacing the
+         * page process. This preserves both persistent and private sessions. */
+        webkit_cookie_manager_get_all_cookies(
+            webkit_website_data_manager_get_cookie_manager(b->manager),
+            NULL, network_cookies_snapshotted, b);
+        return TRUE;
+    }
     note_activity(b);
     g_clear_pointer(&b->load_error, g_free);
+    if (webkit_web_view_is_loading(b->view)) {
+        /* A newly created WebView begins an implicit blank-document load. The
+         * control socket can become reachable before that first document has
+         * committed. Issuing an external URI during that small window can race
+         * WebProcess initialization and leave the first request provisional
+         * forever. Retain only the newest requested destination and dispatch
+         * it when the blank document finishes, with a short timer fallback in
+         * case that bootstrap document never emits LOAD_FINISHED. */
+        if (b->navigation_sequence == 0 && !b->last_committed_uri) {
+            b->deferred_navigation_uri = g_steal_pointer(&uri);
+            b->deferred_navigation_generation = b->web_process_generation;
+            b->deferred_navigation_deadline_us = g_get_monotonic_time() +
+                (gint64)DEFERRED_NAVIGATION_SETTLE_MILLISECONDS *
+                    G_TIME_SPAN_MILLISECOND;
+            b->deferred_navigation = g_timeout_add(
+                DEFERRED_NAVIGATION_RETRY_MILLISECONDS,
+                deferred_navigation_load, b);
+            return TRUE;
+        }
+    }
+    /* Let WebKit replace the previous navigation itself, including a committed
+     * document that still has active subresources. An explicit stop followed
+     * by a separate remote load can leave WebKit's per-page network state
+     * permanently provisional even after the cancellation callbacks drain.
+     * The previous load's watchdog has already been cancelled above. */
+    arm_navigation_watchdog(b, uri);
     webkit_web_view_load_uri(b->view, uri);
     return TRUE;
 }
@@ -789,20 +1654,59 @@ static void youtube_navigation_message(WebKitUserContentManager *manager,
         pending_navigation_free);
 }
 
-static void javascript_done(GObject *object, GAsyncResult *result, gpointer data)
+static gboolean javascript_error_after_grace(gpointer data)
 {
     Request *r = data;
-    note_activity(r->browser);
+    r->page_error_grace = 0;
     if (r->page_bound) {
         r->browser->page_requests = g_list_remove(r->browser->page_requests, r);
         r->page_bound = FALSE;
     }
+    if (r->reset_cancelled || r->browser->engine_state != ENGINE_READY ||
+        r->browser->web_process_generation != r->page_generation) {
+        reply_full(r, NULL, "WebKit was reset while the page operation was running",
+            "webkit_reset", TRUE);
+    } else if (r->operation_timed_out) {
+        reply_full(r, NULL, "JavaScript operation timed out and was cancelled",
+            "operation_timeout", TRUE);
+    } else {
+        reply(r, NULL, r->page_error ? r->page_error : "JavaScript failed");
+    }
+    return G_SOURCE_REMOVE;
+}
+
+static void javascript_done(GObject *object, GAsyncResult *result, gpointer data)
+{
+    Request *r = data;
+    note_activity(r->browser);
     g_autoptr(GError) error = NULL;
     g_autoptr(JSCValue) value = webkit_web_view_call_async_javascript_function_finish(
         WEBKIT_WEB_VIEW(object), result, &error);
+    /* WebKit can complete an in-flight JS call with INVALID_RESULT just before
+     * emitting web-process-terminated. Keep the request page-bound for one
+     * short main-loop grace period so the termination handler can mark it as
+     * reset-cancelled. Without this ordering guard, automation observes a
+     * non-retryable "Unsupported result type" instead of webkit_reset. */
+    if (!value && !r->reset_cancelled && error &&
+        g_error_matches(error, WEBKIT_JAVASCRIPT_ERROR,
+                        WEBKIT_JAVASCRIPT_ERROR_INVALID_RESULT)) {
+        g_free(r->page_error);
+        r->page_error = g_strdup(error->message);
+        r->page_error_grace = g_timeout_add(100, javascript_error_after_grace, r);
+        return;
+    }
+    if (r->page_bound) {
+        r->browser->page_requests = g_list_remove(r->browser->page_requests, r);
+        r->page_bound = FALSE;
+    }
     if (r->reset_cancelled) {
         reply_full(r, NULL, "WebKit was reset while the page operation was running",
             "webkit_reset", TRUE);
+        return;
+    }
+    if (r->operation_timed_out) {
+        reply_full(r, NULL, "JavaScript operation timed out and was cancelled",
+            "operation_timeout", TRUE);
         return;
     }
     if (!value) {
@@ -848,6 +1752,8 @@ static void dispatch(Request *r)
         json_object_set_string_member(state, "title", title ? title : "");
         json_object_set_boolean_member(state, "loading",
             b->view && webkit_web_view_is_loading(b->view));
+        json_object_set_boolean_member(state, "web_process_responsive",
+            b->view && webkit_web_view_get_is_web_process_responsive(b->view));
         json_object_set_boolean_member(state, "can_go_back",
             b->view && webkit_web_view_can_go_back(b->view));
         json_object_set_boolean_member(state, "can_go_forward",
@@ -863,12 +1769,39 @@ static void dispatch(Request *r)
             b->memory_protection_enabled);
         json_object_set_int_member(state, "configured_memory_kill_threshold_mib",
             b->configured_kill_threshold);
+        json_object_set_int_member(state, "memory_recycle_threshold_mib",
+            b->memory_recycle_threshold);
+        json_object_set_int_member(state, "network_recycle_threshold_mib",
+            b->network_recycle_threshold);
+        json_object_set_int_member(state, "network_thread_recycle_threshold",
+            b->network_thread_recycle_threshold);
+        json_object_set_double_member(state, "network_pss_mib",
+            (double)b->network_pss_kib / 1024.0);
+        json_object_set_int_member(state, "network_threads", b->network_threads);
+        json_object_set_int_member(state, "proactive_recycle_count",
+            b->proactive_recycle_count);
+        json_object_set_int_member(state, "network_process_recycle_count",
+            b->network_process_recycle_count);
         json_object_set_string_member(state, "download_dir", b->download_dir);
         json_object_set_int_member(state, "downloads_active", b->downloads_active);
+        json_object_set_int_member(state, "control_clients", b->clients);
+        json_object_set_int_member(state, "page_requests_active",
+            g_list_length(b->page_requests));
+        json_object_set_int_member(state, "automation_timeout_count",
+            b->automation_timeout_count);
+        json_object_set_int_member(state, "navigation_retry_count",
+            b->navigation_retry_count);
+        json_object_set_int_member(state, "navigation_view_rebuild_count",
+            b->navigation_view_rebuild_count);
+        json_object_set_int_member(state, "control_timeout_seconds",
+            b->control_timeout_seconds);
         json_object_set_int_member(state, "pid", getpid());
         json_object_set_string_member(state, "version", LIGHTVIEW_VERSION);
         json_object_set_string_member(state, "running_mode", running_mode_name(b));
         json_object_set_string_member(state, "running_mode_short", running_mode_short_name(b));
+        json_object_set_boolean_member(state, "software_rendering", b->software_rendering);
+        json_object_set_boolean_member(state, "media_gl_sink_disabled",
+            b->media_gl_sink_disabled);
         json_object_set_double_member(state, "ram_pss_mib",
             (double)b->memory_pss_kib / 1024.0);
         json_object_set_double_member(state, "cpu_percent", b->cpu_percent);
@@ -910,7 +1843,17 @@ static void dispatch(Request *r)
             (b->lease_expires_us - g_get_monotonic_time() + G_USEC_PER_SEC - 1) /
                 G_USEC_PER_SEC : 0);
         json_object_set_int_member(state, "web_process_generation", b->web_process_generation);
+        json_object_set_int_member(state, "navigation_sequence", b->navigation_sequence);
+        json_object_set_boolean_member(state, "navigation_watchdog_active",
+            b->navigation_watchdog != 0);
+        json_object_set_boolean_member(state, "load_watchdog_active",
+            b->load_watchdog != 0 || b->load_probe_cancel != NULL);
+        json_object_set_int_member(state, "load_watchdog_seconds",
+            load_watchdog_seconds(b));
+        json_object_set_int_member(state, "load_stop_count", b->load_stop_count);
         json_object_set_int_member(state, "reset_count", b->reset_count);
+        json_object_set_string_member(state, "committed_uri",
+            b->committed_uri ? b->committed_uri : "");
         json_object_set_string_member(state, "last_committed_uri",
             b->last_committed_uri ? b->last_committed_uri : "");
         if (b->last_termination_reason)
@@ -939,6 +1882,9 @@ static void dispatch(Request *r)
         g_autofree char *webkit = g_strdup_printf("%u.%u.%u", webkit_get_major_version(),
             webkit_get_minor_version(), webkit_get_micro_version());
         json_object_set_string_member(details, "webkitgtk", webkit);
+        json_object_set_boolean_member(details, "software_rendering", b->software_rendering);
+        json_object_set_boolean_member(details, "media_gl_sink_disabled",
+            b->media_gl_sink_disabled);
         g_autoptr(JsonNode) node = json_node_new(JSON_NODE_OBJECT);
         json_node_set_object(node, details);
         reply(r, node, NULL);
@@ -1035,8 +1981,9 @@ static void dispatch(Request *r)
         return;
     }
     if (g_str_equal(cmd, "wake")) {
-        if (b->engine_state == ENGINE_RESETTING || b->engine_state == ENGINE_RECOVERING) {
-            reply_engine_unavailable(r);
+        if (b->engine_state == ENGINE_RESETTING || b->engine_state == ENGINE_RECOVERING ||
+            b->engine_state == ENGINE_FAILED) {
+            reply_engine_unavailable(r, b);
             return;
         }
         gboolean changed = b->engine_state == ENGINE_SUSPENDED;
@@ -1182,7 +2129,7 @@ static void dispatch(Request *r)
         return;
     }
     if (b->engine_state != ENGINE_READY || !b->view) {
-        reply_engine_unavailable(r);
+        reply_engine_unavailable(r, b);
         return;
     }
     if (g_str_equal(cmd, "eval")) {
@@ -1190,6 +2137,8 @@ static void dispatch(Request *r)
         if (!script) { reply(r, NULL, "script must be a JavaScript expression string"); return; }
         g_autofree char *body = g_strdup_printf("return await (\n%s\n);", script);
         r->page_bound = TRUE;
+        r->page_generation = b->web_process_generation;
+        r->page_navigation_sequence = b->navigation_sequence;
         note_activity(b);
         b->page_requests = g_list_prepend(b->page_requests, r);
         webkit_web_view_call_async_javascript_function(b->view, body, -1, NULL,
@@ -1248,8 +2197,9 @@ static gboolean incoming(GSocketService *service, GSocketConnection *connection,
     r->cancel = g_cancellable_new();
     r->operation_cancel = g_cancellable_new();
     r->input = g_string_new(NULL);
-    r->timeout = g_timeout_add_seconds(30, request_timeout, r);
     b->clients++;
+    r->client_counted = TRUE;
+    r->timeout = g_timeout_add_seconds(b->control_timeout_seconds, request_timeout, r);
     g_input_stream_read_bytes_async(g_io_stream_get_input_stream(G_IO_STREAM(connection)),
         4096, G_PRIORITY_DEFAULT, r->cancel, read_request, r);
     return TRUE;
@@ -1462,7 +2412,20 @@ static gboolean key_pressed(GtkWidget *widget, GdkEventKey *event, gpointer data
 static gboolean decide_policy(WebKitWebView *view, WebKitPolicyDecision *decision,
                                WebKitPolicyDecisionType type, gpointer data)
 {
-    (void)data;
+    Browser *b = data;
+    if (b->trace_navigation) {
+        const char *uri = NULL;
+        if (type == WEBKIT_POLICY_DECISION_TYPE_RESPONSE)
+            uri = webkit_uri_request_get_uri(webkit_response_policy_decision_get_request(
+                WEBKIT_RESPONSE_POLICY_DECISION(decision)));
+        else {
+            WebKitNavigationAction *action = webkit_navigation_policy_decision_get_navigation_action(
+                WEBKIT_NAVIGATION_POLICY_DECISION(decision));
+            uri = webkit_uri_request_get_uri(webkit_navigation_action_get_request(action));
+        }
+        trace_navigation(b, type == WEBKIT_POLICY_DECISION_TYPE_RESPONSE ?
+            "response-policy" : "navigation-policy", uri);
+    }
     if (type != WEBKIT_POLICY_DECISION_TYPE_NEW_WINDOW_ACTION) return FALSE;
     WebKitNavigationAction *action = webkit_navigation_policy_decision_get_navigation_action(
         WEBKIT_NAVIGATION_POLICY_DECISION(decision));
@@ -1488,6 +2451,7 @@ static WebKitWebContext *create_web_context(Browser *b)
 
 static WebKitWebView *create_web_view(Browser *b)
 {
+    g_clear_pointer(&b->committed_uri, g_free);
     g_autoptr(WebKitUserContentManager) content = webkit_user_content_manager_new();
     g_signal_connect(content, "script-message-received::navigation",
         G_CALLBACK(youtube_navigation_message), b);
@@ -1515,6 +2479,12 @@ static WebKitWebView *create_web_view(Browser *b)
     g_signal_connect(view, "notify::uri", G_CALLBACK(notify_view), b);
     g_signal_connect(view, "load-changed", G_CALLBACK(load_changed), b);
     g_signal_connect(view, "load-failed", G_CALLBACK(load_failed), b);
+    if (b->trace_navigation) {
+        g_signal_connect(view, "resource-load-started", G_CALLBACK(trace_resource_started), b);
+        g_signal_connect(view, "script-dialog", G_CALLBACK(trace_script_dialog), b);
+        g_signal_connect(view, "notify::is-web-process-responsive",
+            G_CALLBACK(trace_process_responsive), b);
+    }
     g_signal_connect(view, "web-process-terminated", G_CALLBACK(process_terminated), b);
     g_signal_connect(view, "decide-policy", G_CALLBACK(decide_policy), b);
     g_signal_connect(view, "button-press-event", G_CALLBACK(note_view_input), b);
@@ -1526,10 +2496,68 @@ static WebKitWebView *create_web_view(Browser *b)
     return view;
 }
 
+static gboolean rebuild_web_view_for_navigation(Browser *b, const char *uri)
+{
+    if (!b->context || !b->view || !uri || !*uri) return FALSE;
+
+    /* This is deliberately narrower than hard_engine_reset(): the shared
+     * context, data manager, network process, profile, control socket, lease,
+     * and Lightview PID all remain alive. Only the WebView and its page process
+     * are replaced, which is enough to escape a permanently provisional or
+     * script-wedged page without reporting a full browser reset. */
+    cancel_page_requests(b);
+    cancel_navigation_watchdog(b);
+    cancel_deferred_navigation(b);
+    cancel_load_watchdog(b);
+
+    WebKitWebView *old_view = b->view;
+    b->view = NULL;
+    g_signal_handlers_disconnect_by_data(old_view, b);
+    webkit_web_view_terminate_web_process(old_view);
+    gtk_widget_destroy(GTK_WIDGET(old_view));
+
+    b->view = create_web_view(b);
+    if (!b->view) return FALSE;
+
+    b->web_process_generation++;
+    b->navigation_view_rebuild_count++;
+    b->current_load_committed = FALSE;
+    note_activity(b);
+    g_clear_pointer(&b->load_error, g_free);
+
+    /* Seed a deterministic local document before dispatching the destination.
+     * This avoids the same implicit-initial-blank race handled at startup. The
+     * generation and rebuild-attempt flag stay changed so a second failure is
+     * bounded and escalates to the ordinary reset path instead of looping. */
+    b->deferred_navigation_uri = g_strdup(uri);
+    b->deferred_navigation_generation = b->web_process_generation;
+    b->deferred_navigation_deadline_us = g_get_monotonic_time() +
+        (gint64)DEFERRED_NAVIGATION_SETTLE_MILLISECONDS * G_TIME_SPAN_MILLISECOND;
+    b->deferred_navigation = g_timeout_add(
+        DEFERRED_NAVIGATION_RETRY_MILLISECONDS,
+        deferred_navigation_load, b);
+    webkit_web_view_load_html(b->view,
+        "<!doctype html><meta charset=\"utf-8\"><title></title>",
+        "about:blank");
+    update_ui(b);
+    g_message("Navigation maintenance rebuilt the WebView: generation=%"
+        G_GUINT64_FORMAT " rebuild_count=%" G_GUINT64_FORMAT,
+        b->web_process_generation, b->navigation_view_rebuild_count);
+    return TRUE;
+}
+
 static void configure_memory_policy(Browser *b)
 {
     b->memory_kill_threshold = b->memory_protection_enabled ?
         b->configured_kill_threshold : 0;
+    /* WebKit applies MemoryPressureSettings independently to each web and
+     * network process. A process-tree PSS total is therefore not comparable
+     * to its per-process kill threshold: summing several healthy processes
+     * made the old derived 75% threshold rebuild the engine every few
+     * navigations. Keep total-PSS maintenance available as an explicit
+     * operator policy, but never derive or enable it implicitly. */
+    if (!b->memory_recycle_explicit)
+        b->memory_recycle_threshold = 0;
     webkit_memory_pressure_settings_set_memory_limit(b->pressure, b->memory_limit);
     webkit_memory_pressure_settings_set_conservative_threshold(b->pressure, 0.25);
     webkit_memory_pressure_settings_set_strict_threshold(b->pressure, 0.50);
@@ -1540,12 +2568,20 @@ static void configure_memory_policy(Browser *b)
     webkit_website_data_manager_set_memory_pressure_settings(b->pressure);
 }
 
-static void destroy_engine(Browser *b)
+static void destroy_engine(Browser *b, gboolean terminate_page)
 {
+    g_clear_pointer(&b->committed_uri, g_free);
+    cancel_navigation_watchdog(b);
+    cancel_deferred_navigation(b);
+    cancel_load_watchdog(b);
     if (b->view) {
         WebKitWebView *old_view = b->view;
         b->view = NULL;
         g_signal_handlers_disconnect_by_data(old_view, b);
+        /* A queued JavaScript probe can retain the view even after GTK
+         * destroys its widget. Force resets must also stop a wedged worker
+         * so those callbacks can finish and release the retired engine. */
+        if (terminate_page) webkit_web_view_terminate_web_process(old_view);
         gtk_widget_destroy(GTK_WIDGET(old_view));
     }
     g_clear_object(&b->context);
@@ -1566,7 +2602,14 @@ static gboolean wake_engine(Browser *b, const char *input)
     }
     note_activity(b);
     arm_recovery_timeout(b);
-    webkit_web_view_load_uri(b->view, uri);
+    /* Wake through the same deterministic local bootstrap used by recovery.
+     * A slow remote destination must not consume the engine-startup budget or
+     * commit while ENGINE_RECOVERING hides its last-visited metadata. */
+    g_clear_pointer(&b->pending_navigation_uri, g_free);
+    if (!g_str_equal(uri, "about:blank"))
+        b->pending_navigation_uri = g_steal_pointer(&uri);
+    webkit_web_view_load_html(b->view,
+        "<!doctype html><meta charset=\"utf-8\"><title></title>", "about:blank");
     update_ui(b);
     g_message("WebKit waking after idle hibernation");
     return TRUE;
@@ -1585,7 +2628,7 @@ static gboolean hibernate_tick(gpointer data)
         return G_SOURCE_CONTINUE;
     b->engine_state = ENGINE_SUSPENDED;
     b->web_process_generation++;
-    destroy_engine(b);
+    destroy_engine(b, FALSE);
 #ifdef __GLIBC__
     malloc_trim(0);
 #endif
@@ -1614,7 +2657,7 @@ static void hard_engine_reset(Browser *b)
     b->engine_state = ENGINE_RECOVERING;
     b->hard_reset_used = TRUE;
     cancel_page_requests(b);
-    destroy_engine(b);
+    destroy_engine(b, TRUE);
     b->context = create_web_context(b);
     b->view = create_web_view(b);
     if (!b->context || !b->view) {
@@ -1669,7 +2712,7 @@ static gboolean switch_profile(Browser *b, const char *path, GError **error)
 
     WebKitWebsiteDataManager *old_manager = b->manager;
     int old_fd = b->profile_fd;
-    destroy_engine(b);
+    destroy_engine(b, TRUE);
     b->manager = new_manager;
     b->profile_fd = new_fd;
     b->private_mode = FALSE;
@@ -2040,12 +3083,31 @@ int main(int argc, char **argv)
     if (!g_getenv("WEBKIT_DMABUF_RENDERER_FORCE_SHM"))
         g_setenv("WEBKIT_DMABUF_RENDERER_FORCE_SHM", "1", FALSE);
     Browser b = {0};
+    b.trace_navigation = environment_truthy(g_getenv("LIGHTVIEW_TRACE_NAVIGATION"));
+    gboolean drm_accessible = has_accessible_drm_render_node();
+    const char *software_override = g_getenv("LIBGL_ALWAYS_SOFTWARE");
+    if (!software_override && !drm_accessible) {
+        g_setenv("LIBGL_ALWAYS_SOFTWARE", "1", FALSE);
+        software_override = "1";
+        g_message("No accessible DRM render node; using Mesa software rendering");
+    }
+    b.software_rendering = environment_truthy(software_override);
+    const char *media_gl_override = g_getenv("WEBKIT_GST_DISABLE_GL_SINK");
+    if (!media_gl_override && !drm_accessible) {
+        g_setenv("WEBKIT_GST_DISABLE_GL_SINK", "1", FALSE);
+        media_gl_override = "1";
+        g_message("No accessible DRM render node; disabling GStreamer GL video sink");
+    }
+    b.media_gl_sink_disabled = environment_truthy(media_gl_override);
     b.profile_fd = -1;
     b.engine_state = ENGINE_READY;
     b.web_process_generation = 1;
     gboolean no_control = FALSE, version = FALSE, disable_memory_kill = FALSE;
-    gint memory_limit = 0, memory_kill_threshold = 0;
+    gint memory_limit = 0, memory_kill_threshold = 0, memory_recycle_threshold = -1;
+    gint network_recycle_threshold = DEFAULT_NETWORK_RECYCLE_THRESHOLD_MIB;
+    gint network_thread_recycle_threshold = DEFAULT_NETWORK_THREAD_RECYCLE_THRESHOLD;
     gint idle_hibernate = DEFAULT_IDLE_HIBERNATE_SECONDS;
+    gint control_timeout = DEFAULT_CONTROL_TIMEOUT_SECONDS;
     gint lease_ttl = DEFAULT_LEASE_SECONDS;
     g_autofree char *profile = NULL;
     g_auto(GStrv) urls = NULL;
@@ -2057,8 +3119,12 @@ int main(int argc, char **argv)
         {"no-images", 0, 0, G_OPTION_ARG_NONE, &b.no_images, "Skip automatic image loading", NULL},
         {"memory-limit", 0, 0, G_OPTION_ARG_INT, &memory_limit, "WebKit per-process memory-pressure limit in MiB", "MIB"},
         {"memory-kill-threshold", 0, 0, G_OPTION_ARG_INT, &memory_kill_threshold, "Terminate a WebKit process above this threshold", "MIB"},
+        {"memory-recycle-threshold", 0, 0, G_OPTION_ARG_INT, &memory_recycle_threshold, "Rebuild WebKit before navigation when process-tree PSS reaches MiB (0 disables)", "MIB"},
+        {"network-recycle-threshold", 0, 0, G_OPTION_ARG_INT, &network_recycle_threshold, "Replace only WebKit's network process before navigation when its PSS reaches MiB (0 disables)", "MIB"},
+        {"network-thread-recycle-threshold", 0, 0, G_OPTION_ARG_INT, &network_thread_recycle_threshold, "Replace only WebKit's network process before navigation when its thread count reaches this value (0 disables)", "COUNT"},
         {"disable-memory-kill", 0, 0, G_OPTION_ARG_NONE, &disable_memory_kill, "Never terminate WebKit for exceeding the memory threshold", NULL},
         {"idle-hibernate", 0, 0, G_OPTION_ARG_INT, &idle_hibernate, "Suspend WebKit after idle seconds (default 3600; 0 disables)", "SECONDS"},
+        {"control-timeout", 0, 0, G_OPTION_ARG_INT, &control_timeout, "Cancel a WebKit page operation after this many seconds", "SECONDS"},
         {"lease-ttl", 0, 0, G_OPTION_ARG_INT, &lease_ttl, "Agent lease lifetime in seconds", "SECONDS"},
         {"low-memory", 0, 0, G_OPTION_ARG_NONE, &b.low_memory, "Reduce optional web features and use a 384 MiB limit", NULL},
         {"browser-cache", 0, 0, G_OPTION_ARG_NONE, &b.browser_cache, "Favor repeat-load speed over memory savings", NULL},
@@ -2081,11 +3147,13 @@ int main(int argc, char **argv)
         g_printerr("Use one URL; --profile and --private are mutually exclusive.\n"); return 1;
     }
     if (idle_hibernate < 0 || idle_hibernate > MAX_IDLE_HIBERNATE_SECONDS ||
+        control_timeout < 1 || control_timeout > 300 ||
         lease_ttl < 1 || lease_ttl > 3600) {
-        g_printerr("--idle-hibernate must be 0–86400 seconds and --lease-ttl must be 1–3600 seconds.\n");
+        g_printerr("--idle-hibernate must be 0–86400 seconds, --control-timeout must be 1–300 seconds, and --lease-ttl must be 1–3600 seconds.\n");
         return 1;
     }
     b.idle_hibernate_seconds = (guint)idle_hibernate;
+    b.control_timeout_seconds = (guint)control_timeout;
     b.lease_seconds = (guint)lease_ttl;
     b.memory_limit_explicit = memory_limit != 0;
     if (memory_limit == 0) memory_limit = b.low_memory ? 384 : 768;
@@ -2103,6 +3171,27 @@ int main(int argc, char **argv)
     }
     b.memory_protection_enabled = !disable_memory_kill;
     b.configured_kill_threshold = (guint)memory_kill_threshold;
+    b.memory_recycle_explicit = memory_recycle_threshold >= 0;
+    if (memory_recycle_threshold > 65536 ||
+        (memory_recycle_threshold > 0 && memory_recycle_threshold < 256) ||
+        (b.memory_protection_enabled && memory_recycle_threshold > 0 &&
+         memory_recycle_threshold >= memory_kill_threshold)) {
+        g_printerr("--memory-recycle-threshold must be 0 or 256–65536 MiB and lower than the enabled kill threshold.\n");
+        return 1;
+    }
+    if (b.memory_recycle_explicit)
+        b.memory_recycle_threshold = (guint)memory_recycle_threshold;
+    if (network_recycle_threshold < 0 || network_recycle_threshold > 65536) {
+        g_printerr("--network-recycle-threshold must be 0–65536 MiB.\n");
+        return 1;
+    }
+    b.network_recycle_threshold = (guint)network_recycle_threshold;
+    if (network_thread_recycle_threshold < 0 ||
+        network_thread_recycle_threshold > 65536) {
+        g_printerr("--network-thread-recycle-threshold must be 0–65536.\n");
+        return 1;
+    }
+    b.network_thread_recycle_threshold = (guint)network_thread_recycle_threshold;
     const char *downloads = g_get_user_special_dir(G_USER_DIRECTORY_DOWNLOAD);
     b.download_dir = downloads ? g_strdup(downloads) :
         g_build_filename(g_get_home_dir(), "Downloads", NULL);
@@ -2186,6 +3275,23 @@ int main(int argc, char **argv)
     gtk_box_pack_start(GTK_BOX(column), b.message, FALSE, FALSE, 2);
     gtk_container_add(GTK_CONTAINER(b.window), column);
     b.view = create_web_view(&b);
+    g_autofree char *initial_uri = normalize_uri(urls ? urls[0] : "about:blank");
+    if (!initial_uri) {
+        g_printerr("Unsupported URL\n");
+        return 1;
+    }
+    /* Queue a real initial document before exposing the control socket. A new
+     * WebView can report itself as loading even though its implicit blank state
+     * will not emit a load-finished event. A local HTML document gives startup
+     * a deterministic first commit; navigate() can safely queue an agent's
+     * immediate first URL behind it. */
+    note_activity(&b);
+    arm_navigation_watchdog(&b, initial_uri);
+    if (g_str_equal(initial_uri, "about:blank"))
+        webkit_web_view_load_html(b.view, "<!doctype html><title></title>",
+            "about:blank");
+    else
+        webkit_web_view_load_uri(b.view, initial_uri);
     g_signal_connect(b.window, "destroy", G_CALLBACK(gtk_main_quit), NULL);
     g_signal_connect(b.window, "key-press-event", G_CALLBACK(key_pressed), &b);
     g_signal_connect(b.entry, "activate", G_CALLBACK(address_activate), &b);
@@ -2203,27 +3309,43 @@ int main(int argc, char **argv)
     g_unix_signal_add(SIGINT, quit_browser, NULL);
     g_unix_signal_add(SIGTERM, quit_browser, NULL);
     gtk_widget_show_all(b.window);
-    if (!navigate(&b, urls ? urls[0] : "about:blank")) {
-        g_printerr("Unsupported URL\n");
-        if (!no_control) g_unlink(b.socket_path);
-        return 1;
-    }
     sample_resource_usage(&b);
     b.resource_timer = g_timeout_add_seconds(2, sample_resource_usage, &b);
     set_idle_hibernate(&b, b.idle_hibernate_seconds);
     gtk_widget_grab_focus(urls ? GTK_WIDGET(b.view) : b.entry);
     gtk_main();
+    gboolean terminate_on_exit = b.load_probe_cancel != NULL || b.page_requests != NULL;
     if (b.resource_timer) g_source_remove(b.resource_timer);
     if (b.hibernate_timer) g_source_remove(b.hibernate_timer);
     if (b.flash_timeout) g_source_remove(b.flash_timeout);
     if (b.recovery_timeout) g_source_remove(b.recovery_timeout);
+    cancel_load_watchdog(&b);
     if (b.service) {
         g_socket_service_stop(b.service);
         g_socket_listener_close(G_SOCKET_LISTENER(b.service));
         g_unlink(b.socket_path);
         g_object_unref(b.service);
     }
+    /* A control-socket quit used to leave the still-live WebView owned by the
+     * GTK window and then let process exit tear down WebKit abruptly. In
+     * particular, a just-completed localStorage write could remain in the
+     * WebProcess journal and be lost intermittently. Destroy the view while
+     * retaining its context, briefly service the WebProcess shutdown, and
+     * only then release the context/network process. */
+    cancel_page_requests(&b);
+    cancel_navigation_watchdog(&b);
+    cancel_deferred_navigation(&b);
+    cancel_load_watchdog(&b);
+    if (b.view) {
+        WebKitWebView *old_view = b.view;
+        b.view = NULL;
+        g_signal_handlers_disconnect_by_data(old_view, &b);
+        if (terminate_on_exit) webkit_web_view_terminate_web_process(old_view);
+        gtk_widget_destroy(GTK_WIDGET(old_view));
+    }
+    drain_main_context_for(100);
     g_clear_object(&b.context);
+    drain_main_context_for(100);
     g_clear_object(&b.settings);
     g_clear_object(&b.manager);
     webkit_memory_pressure_settings_free(b.pressure);
@@ -2233,9 +3355,13 @@ int main(int argc, char **argv)
     g_free(b.load_error);
     g_free(b.download_dir);
     g_free(b.download_message);
+    g_free(b.committed_uri);
     g_free(b.last_committed_uri);
     g_free(b.last_termination_reason);
     g_free(b.last_reset_at);
+    g_free(b.pending_navigation_uri);
+    g_free(b.navigation_watchdog_uri);
+    g_free(b.deferred_navigation_uri);
     g_free(b.lease_token);
     return 0;
 }

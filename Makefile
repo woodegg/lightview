@@ -32,6 +32,7 @@ build/lightview-sandbox-launcher: src/lightview-sandbox-launcher.c
 	$(CC) $(CFLAGS) -o $@ $<
 
 check: build/lightview
+	python3 tests/stability_runner.py
 	dbus-run-session -- xvfb-run -a python3 tests/integration.py
 
 install: build/lightview build/lightview-sandbox-launcher
