@@ -992,5 +992,204 @@ media decoder. Main PID 684711, the dedicated control socket, full seventeen-sit
 set, 60-second control budget, memory thresholds and zero-maintenance resource
 gates are pinned. Optional resource/navigation tracing is off; no debugger
 attaches during healthy testing. Independent audit, process sampling and
-post-failure UI/native network capture are armed. This new attempt must still
-complete the full 24-hour duration and resource-growth audit.
+post-failure UI/native network capture were armed.
+
+That attempt failed after 4 hours 14 minutes 27.504 seconds: 2,373 of 2,374
+navigations verified successfully, covering 139 complete seventeen-site rounds.
+The last Microsoft document was still loading at the 60-second verification
+deadline. A later read-only observation recorded DOM interactive at 64.200
+seconds, DOMContentLoaded at 65.878 seconds and load completion at 67.389
+seconds. Its eventual completion does not change the failed verdict.
+
+The UI, socket and pinned libraries remained unchanged, with zero resets,
+view rebuilds, automation timeouts or maintenance recycles. Across the run,
+one navigation retry and one load stop were recorded. The failure capture
+found two valid IPC connections and no retained invalid connection; it did
+not reproduce the earlier IPC-retention fault.
+
+The header guard recovered 36 requests from one unresponsive connection
+around 20–21 seconds into the last navigation. Thirty-three requests then
+exhausted their retry bound on the replacement connection around 40 seconds;
+another request reached its first recovery around 60 seconds. This is
+evidence of repeated header stalls, rather than only the younger-stream wait
+fixed by coalescing. Parser-dependent request waves may accumulate these
+waits, but their exact causal sequence still needs a controlled reproduction.
+The post-failure native Soup snapshot arrived after its queue had drained;
+that empty snapshot cannot identify what blocked the requests earlier.
+
+Resource analysis had only 3.772 post-warmup hours and was therefore not
+evaluable against the unchanged four-hour minimum. Early-to-late PSS
+baseline increased by 2.36 MiB and median PSS by 90.53 MiB; median descriptors
+decreased by seven and median threads were unchanged. These observations
+neither establish a leak nor qualify the required leak-free endurance.
+
+The failed attempt and post-failure evidence were preserved before retiring
+its processes. A separate, fresh-profile diagnostic started with the same
+qualified libraries and all seventeen sites, with resource/navigation
+tracing enabled. It is explicitly ineligible for formal endurance credit.
+The next investigation concerns replacement-connection stalls; an unchanged
+formal retry is not the corrective action.
+
+A local dual-protocol fixture now reproduces a narrower recovery limitation:
+both the original and replacement HTTP/2 connections withhold response headers,
+while HTTP/1.1 can serve the same resource. The qualified candidate exhausts
+its single retry in that fixture. A separate, unqualified prototype sends only
+that eligible retry over HTTP/1.1 and receives the expected payload at about
+20.1 seconds. This does not establish that the live CDN has the same cause.
+
+The initial prototype lacked a deadline for a silent HTTP/1.1 fallback and is
+not eligible for promotion. Its successor bounds that fallback's header wait
+without timing ordinary HTTP/1.1 requests or interrupting response bodies.
+Six focused cases passed: recovery, silent fallback termination at 41.1
+seconds, a complete delayed body at 45.1 seconds, caller cancellation at 23.2
+seconds, explicit HTTP 403 preservation, and an ordinary HTTP/1.1 response
+whose headers take 25 seconds. The first cancellation fixture returned its
+response before the scheduled cancellation, so that failed test is preserved;
+the corrected silent-response fixture exercised cancellation successfully.
+These checks are preliminary. Concurrency, pause/resume, resource stress,
+existing recovery interactions, upstream suites, complete browser integration
+and live comparison remain required before another formal endurance attempt.
+
+Further qualification exposed a separate HTTP/1.1 pause/resume defect. A
+native test paused an outstanding asynchronous read, waited 25 seconds and
+resumed it after the fixture response became available. Both the first
+fallback candidate and the preceding library's ordinary HTTP/1.1 path stayed
+unfinished until their test deadlines. Inspection showed that an external
+pause destroyed the pending read's dispatch source; unpause cleared the flag
+without restoring that dispatch. Production relevance to the Microsoft delay
+remains unproven.
+
+The next private candidate preserves a paused dispatch for the same pending
+read task, keeps cancellation observable during the pause, and wakes that
+dispatch on unpause. It passed native fallback pause/resume, ordinary HTTP/1.1
+pause/resume and cancellation-while-paused regressions. Those private-interface
+tests link the candidate's static archive, following upstream test conventions;
+shared-library transport and browser checks are recorded separately.
+
+The six focused fallback cases, eleven transport fault cases, both original
+late-stream/slow-body interactions and a three-round cancellation stress test
+passed again. All 90 stress requests completed cancellation, with descriptor
+and thread counts returning without per-round accumulation. The sandboxed
+parser fixture executed both scripts and completed after recovery. An initial
+adaptation of that fixture had omitted its late-browser server scenario and
+returned generic text for the page; its failure is preserved, with the corrected
+fixture's result recorded separately. The first Python pause test also could
+not call the private pause interface and is not a passing pause check.
+
+Nine upstream suites passed all 120 subtests. The private candidate library
+SHA-256 is
+`6da7e5824d923a6c5c6b0136616bcdfdf82e23c9281678d17128ccc3292007fa`.
+Its three-file patch was applied without fuzz to pristine 3.8.1 source and
+reproduced all candidate files byte for byte. Full Lightview application
+qualification has started in a separate runtime directory. Live comparison
+and the unchanged full 24-hour acceptance remain outstanding; no production
+deployment or release qualification follows from these local results.
+
+The traced diagnostic of the preceding coalesced candidate subsequently
+failed after 1,378.054 seconds, with 180 of 181 verified navigations. Microsoft
+again exceeded the 60-second document gate, then completed parsing naturally
+at 65.931 seconds and loading at 68.126 seconds. Its final navigation recorded
+seven first header-guard recoveries and six exhausted retries, including a new
+recovery around 60 seconds. The earlier intrusive native probe is disclosed
+in its manifest; this diagnostic is ineligible for formal endurance credit.
+Its failed verdict, resource trace and post-failure capture were preserved
+before retirement. The new fallback/pause candidate was not used in that run.
+
+Full application qualification of the new candidate finished successfully:
+25 verifier tests and all 45 integration tests passed, with its exact library
+mapped in UI, network and page processes as unprivileged UID 1000 with NNP and
+the sandbox enabled. An identical library copy was placed in an independent
+diagnostic prefix; neither the production executable nor system libraries were
+replaced. Fresh-profile diagnostic `20261117-160405` started at about 21:04 UTC
+on November 17, retaining the complete seventeen-site set and existing budgets.
+Resource/navigation tracing is enabled, with native capture armed only after a
+failed verdict. Live comparison and a new strict 24-hour attempt remain pending.
+
+The repository's portable transport fixture now passes all eight cases against
+the exact candidate library; its protocol-fallback control fails against the
+preceding library after two silent HTTP/2 attempts and a timeout at 40.133
+seconds. The accompanying native pause fixture passes all three cases against
+the candidate static archive. Its ordinary HTTP/1.1 control against the
+preceding archive resumes at 26.070 seconds but never completes the read,
+failing its 35-second deadline. Both negative results remain failed controls.
+The test source hashes were checked unchanged throughout the final runs, and
+the public runtime patch reproduces all three qualified source files byte for
+byte. These portable checks preserve the distinction between shared-library
+transport verification and private-interface static-link verification.
+
+During the live candidate comparison, Microsoft navigation in round 17
+encountered two header-guard recoveries about twenty seconds apart. Each event
+was followed within a fraction of a second by a successful HTTP 200 completion
+for a long-running Microsoft resource. The document passed verification and
+the next navigation began 46.380 seconds after that Microsoft navigation
+started, without a reset, rebuild or automation timeout. Origin-only resource
+IDs are not directly mapped to native stream IDs, so timing correlation does
+not establish request identity. No resource error-code-24 timeout was recorded
+at this checkpoint; HTTP/2 exhausted-retry logs alone would not count expiry
+of the separate HTTP/1.1 fallback timer. This is a preserved live recovery
+observation, with the full endurance acceptance still outstanding.
+
+That same diagnostic subsequently failed after 3,664.067 seconds (about
+61 minutes), with 537 of 538 navigations verified. Round 32's Microsoft
+document remained head-only at the 60-second deadline. Main PID, socket and
+generation stayed unchanged, with zero resets, rebuilds, automation timeouts
+or maintenance recycles; one navigation retry had occurred during the run.
+The preceding successful checkpoints do not change this failed verdict.
+
+Post-failure native capture found two HTTP/1.1 operations still waiting for
+headers and another HTTP/2 operation waiting for headers, all against the same
+remote endpoint. The HTTP/1.1 operations had only recently started their local
+header timers, despite the page already exceeding its verification budget.
+Resource tracing recorded thirteen timeout failures, with batches completing
+around 41, 62 and 83 seconds after their resource starts. Thus the separate
+post-write header timer left connection-pool queueing outside its limit. The
+remaining wait is no longer explained only by the choice of HTTP protocol.
+
+A controlled local reproduction queues six silent fallback requests through
+a two-connection HTTP/1.1 pool. The preceding candidate times them out in pairs
+at 41.144, 62.172 and 83.203 seconds. Its shared caller cancellable remains
+usable and a subsequent probe succeeds, distinguishing delayed queue progress
+from a crashed session. A new private candidate is being developed to bound
+the single fallback across queueing, connection establishment and response
+headers, while preserving the caller's cancellable, paused time and active
+response bodies. It has not qualified for a live or formal attempt.
+
+The final resource window remained too short for acceptance: 31 complete
+rounds provided 0.856 post-warmup hours. Its early-to-late median PSS difference
+had returned to +2.21 MiB, baseline PSS to -6.32 MiB, descriptors to -1 and
+threads to -3. The intermediate increase was not monotonic; this neither
+establishes an allocation cause nor supplies the required four-hour resource
+evidence. The prepared formal launch remains gated and was not started.
+
+The private queue-budget prototype reproduced a successful correction in the
+same six-request fixture: all six expired around 40.2 seconds, the shared
+caller cancellable stayed uncancelled, and a subsequent healthy request still
+succeeded. A separate fixture that accepts a TCP connection but withholds its
+TLS handshake also ended around 40.2 seconds with the caller still usable.
+An additional queued-cancellation control found that forwarding cancellation
+without waking the session queue delayed completion by about nineteen seconds;
+the corrected callback wakes that queue and returns cancellation immediately.
+Its earlier prototype and failed control remain preserved separately.
+
+The revised private library's SHA-256 is
+`8f505c31bb16442681cf9d0aeb0a134b664b6a3667d1749e4211e6bef3be68cf`.
+It passed the three queue/TLS/cancellation checks, the existing compatibility
+matrix including paused cancellation and response-body preservation, ninety
+cancellation stress requests, sandboxed parser recovery and nine upstream
+suites. Full application qualification subsequently passed 25 verifier tests
+and 45 integration tests with the revised library mapped in all three process
+roles. No formal or live restart has been performed, and the failed comparison
+is retained as failed.
+
+A stronger browser fixture containing eighteen permanently silent external
+scripts still failed its 95-second document deadline with both the preceding
+fallback library and the revised queue-budget library. After speculative
+preloads timed out, parsing issued additional requests for those resources.
+A diagnostic using the browser cache model completed in about forty seconds
+without those duplicate requests; that cache setting has not been adopted in
+the product. A private WebKit prototype attempting to reuse document-local
+preload timeout errors also failed the fixture, despite verified loading of
+the prototype in UI, network and page processes. That prototype remains
+unqualified and is not included in this repository's runtime patch. The
+document-level retry sequence remains unresolved; local transport passes do
+not establish a passing browser endurance result.

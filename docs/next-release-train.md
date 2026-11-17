@@ -396,8 +396,23 @@ separate diagnostic and local regression exposed additional waits for younger
 requests on an already retired connection. Coalescing those eligible retries
 reduced the controlled delay from 37 to 21 seconds while preserving slow
 response bodies. The follow-up passed thirteen fault scenarios, 77 upstream
-subtests, 25 verifier checks and 45 browser integration checks; strict attempt
-`20261117-111544` is now running. The full endurance gate remains unmet.
+subtests, 25 verifier checks and 45 browser integration checks. Strict attempt
+`20261117-111544` then failed after 4 h 14 min: the Microsoft document exceeded
+60 seconds, with repeated header stalls on a replacement connection. Its later
+completion at 67.389 seconds does not qualify the navigation. No reset or view
+rebuild occurred, and its 3.772 post-warmup hours were insufficient for the
+resource-growth audit. A bounded per-message HTTP/1.1 fallback and a separately
+reproduced asynchronous HTTP/1.1 pause/resume correction then passed nine
+upstream suites (120 subtests), 25 verifier and 45 browser integration checks,
+plus transport, concurrency, pause/cancel and resource-release regressions.
+Portable transport and native pause tests reproduce failures against the
+preceding library and pass against that candidate. Its full seventeen-site
+live diagnostic then failed after about 61 minutes on another head-only
+Microsoft document. A native snapshot and local two-connection-pool regression
+showed that queueing was outside the fallback's header timer, producing timeout
+batches at approximately 41, 62 and 83 seconds. A private correction covering
+that queue/connect wait is under development; it has not qualified for another
+live or formal attempt. The full endurance gate remains unmet.
 The V3 candidate completed a full 24-hour navigation run on November 10--11,
 but failed acceptance because descriptor and thread counts grew materially.
 The recorded evidence and distinction from a passing run are documented in
