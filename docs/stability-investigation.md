@@ -1360,3 +1360,150 @@ sixty-second verification budget. Post-warmup resource evidence covered only
 changed by -9.75 MiB, baseline by +49.352 MiB, descriptors by -19 and threads
 by -2; these observations do not establish leak-free endurance. The full
 24-hour acceptance remains outstanding.
+
+The redirect-aware diagnostic completed 7,200.384 seconds with all 1,086
+navigations healthy, 63 complete site rounds, unchanged PID/socket/libraries
+and zero resets, rebuilds, automation timeouts or maintenance recycles. Its
+38 twelve-second load-observation timeouts all led to verified documents
+within the original document budget. Post-warmup resource coverage was only
+1.765 hours, so its independent endurance audit remained false; the separate
+navigation comparison review allowed a fresh formal attempt without changing
+that original verdict. Early-to-late median PSS changed by +9.33 MiB,
+descriptors by -0.5 and threads by +1.5. These short-window measurements do
+not establish leak-free endurance.
+
+The transition controller initially stopped before invoking the formal
+launcher: an optional failure-capture unit had already exited normally and
+been unloaded, so the cleanup command returned an error. Its log confirms
+that no failure probe ran. The original controller and error receipt were
+preserved. Cleanup now checks authoritative unit state, accepts already
+unloaded inactive units, and verifies that loaded units have stopped. A
+one-time continuation rechecked all actual prerequisites and confirmed the
+old diagnostic processes had ended before launching the fresh attempt.
+This was a test-controller transition error, not a failed browser navigation.
+
+Formal attempt `20261117-211752` started at 02:17:54 UTC on November 18,
+with main PID 1393968, a fresh profile/socket and repository commit `34a03e9`
+on a clean `main` worktree. It uses the same qualified engine/Soup/decoder
+bytes and all seventeen sites, with resource/navigation tracing disabled.
+Startup media and WebGL checks passed, all eight browser/test/monitor units
+were live, and its first complete site rotation passed. The original full
+86,400-second duration, zero-maintenance and resource-growth gates remain
+unchanged. Its final endurance result is still pending.
+
+The formal attempt's first-hour checkpoint recorded 475 healthy navigations
+across 27 complete rounds, unchanged main PID/socket and network PID 1393973,
+and zero resets, rebuilds, automation timeouts or maintenance recycles. All
+eight runtime/monitor units were live, all four pinned executable/runtime
+hashes matched, and 62 whole-cgroup samples were complete without missing
+WebKit workers, sampling errors or OOM events. Twenty-seven twelve-second
+load-observation waits expired, but every subsequent document verification
+passed. Post-warmup coverage was only 0.848 hours: early-to-late median PSS
+changed by +75.06 MiB, baseline by +32.753 MiB, descriptors by -9.5 and threads
+by zero. Earlier median PSS deltas fluctuated above and below zero; these
+short-window observations do not prove or exclude sustained leakage. The
+unchanged four-hour resource minimum and full 24-hour acceptance remain
+outstanding.
+
+The same formal attempt reached its two-hour checkpoint with 937 healthy
+navigations and 55 complete site rounds. Main PID, control socket and observed
+network PID were unchanged; all eight runtime/monitor units were live, all
+four pinned hashes matched, and 121 whole-cgroup samples were complete without
+missing WebKit workers, sampling errors or OOM events. Reset, rebuild,
+automation-timeout and maintenance-recycle counts remained zero. Sixty
+twelve-second load-observation waits expired, but all documents subsequently
+passed verification. Post-warmup resource coverage reached 1.8 hours, still
+below four: median PSS changed by +6.74 MiB, baseline by -28.917 MiB,
+descriptors by +2 and threads by -3. This remains an in-progress strict
+24-hour run, not a passing endurance or leak-free verdict.
+
+The formal attempt's three-hour checkpoint recorded 1,426 healthy navigations
+and 83 complete rounds, with unchanged main PID/socket and observed network
+PID. All eight runtime/monitor units were live, all four pinned hashes matched,
+and 182 whole-cgroup samples were complete without missing workers, sampling
+errors or OOM events. Resets, rebuilds, automation timeouts and maintenance
+recycles remained zero. Eighty-nine twelve-second load-observation waits
+expired, but all documents subsequently passed verification. Post-warmup
+coverage was 2.689 hours, below the unchanged four-hour minimum. Median PSS
+changed by +41.34 MiB, baseline by -19.589 MiB, descriptors by +3.5 and
+threads by -1. The strict 24-hour attempt remains in progress; these
+measurements are not a completed resource-growth or endurance acceptance.
+
+The same attempt reached four hours with 1,897 healthy navigations and 111
+complete rounds. Main PID/socket and the sampled network PID remained
+unchanged. All eight runtime/monitor units were live, all four pinned hashes
+matched, and 241 whole-cgroup samples were complete without missing workers,
+sampling errors or OOM events. Resets, rebuilds, automation timeouts and
+maintenance recycles remained zero. There were 109 twelve-second
+load-observation expirations, each followed by successful document verification.
+Post-warmup resource coverage was 3.564 hours, still below the unchanged
+four-hour minimum. Median PSS changed by +24.05 MiB, baseline by -15.458 MiB,
+descriptors by -1 and threads by -1. Four hours of runtime is not equivalent
+to four hours of comparable post-warmup resource evidence; the strict 24-hour
+attempt and full resource acceptance remain unfinished.
+
+The first evaluable resource checkpoint was reached with 2,132 healthy
+navigations, 125 complete rounds and 4.022 hours of comparable post-warmup
+resource data. The unchanged growth gate did not flag sustained material
+increase. Median PSS changed by +28.875 MiB with a robust slope of
++13.655 MiB/hour: the slope exceeded its rate threshold, but the material
+128 MiB delta threshold did not. Baseline PSS changed by -4.145 MiB,
+descriptors by +3.5 and threads by zero. This is a passing intermediate
+resource-growth check, not proof of zero leakage or completed 24-hour
+acceptance. All eight runtime/monitor units were live; main PID/socket and
+the sampled network PID remained unchanged, all four pinned hashes matched,
+and all 270 whole-cgroup samples were complete without sampling errors,
+missing workers or OOM events. Reset, rebuild, automation-timeout and
+maintenance-recycle counts remained zero. The formal attempt continues.
+
+The five-hour checkpoint recorded 2,415 healthy navigations and 142 complete
+rounds. All eight runtime/monitor units remained live, all four pinned hashes
+matched, main PID/socket and observed network PID were unchanged, and all
+301 whole-cgroup samples were complete without missing workers, sampling
+errors or OOM events. Resets, rebuilds, automation timeouts and maintenance
+recycles remained zero. There were 130 twelve-second load-observation
+expirations, each followed by successful document verification. Comparable
+post-warmup resource coverage reached 4.478 hours, with no sustained material
+growth flagged by the unchanged gate. Median PSS changed by +14.125 MiB,
+baseline by +50.33 MiB, descriptors by +5.5 and threads by zero. The baseline
+and median PSS slopes were +8.838 and +8.317 MiB/hour respectively, while
+both material deltas remained below 128 MiB. These are intermediate results;
+the complete 24-hour endurance and resource acceptance remain outstanding.
+
+A read-only attribution check followed the baseline PSS rise to about
+68 MiB at the 315-minute checkpoint. Using the same warmup and quarter-window
+rules on the captured CSV prefix selected complete rounds 16--49 and 118--151.
+Roles were interpolated from the same rows defining each round's twentieth
+percentile total PSS. Their early-to-late medians changed by +65.125 MiB for
+WebProcess, +2.708 MiB for the UI and +2.004 MiB for NetworkProcess; medians of
+separate roles need not add to the total median. UI/network descriptor and
+thread medians were nearly unchanged.
+
+Facebook's aggregate WebProcess median rose substantially while its DOM
+counts stayed similar, but the number of observations with two page processes
+rose from 8/34 to 26/34. Within the one-process subset its WebProcess median
+was 472.615 MiB early and 470.790 MiB late. The two-process subset rose from
+892.045 to 966.980 MiB, so overlap frequency does not establish the entire
+mechanism. Microsoft documents also differed in element/text counts between
+windows. Sparse whole-cgroup samples observed 309 distinct WebProcess PIDs,
+with no single PID present in more than three samples; this does not measure
+exact lifetimes. These observations identify confounding worker overlap and
+content changes, not a proven leak root cause. All page processes remain
+included in the original resource totals; no runtime policy, thresholds or
+site coverage changed. The attribution artifacts were preserved privately,
+and the same formal attempt continues.
+
+The six-hour checkpoint recorded 2,968 healthy navigations and 174 complete
+rounds. All eight runtime/monitor units were live, all four pinned hashes
+matched, main PID/socket and observed network PID remained unchanged, and
+all 361 whole-cgroup samples were complete without sampling errors, missing
+workers or OOM events. Resets, rebuilds, automation timeouts and maintenance
+recycles remained zero. There were 144 twelve-second load-observation
+expirations, each followed by successful document verification. Comparable
+post-warmup coverage reached 5.359 hours. Baseline PSS changed by +90.448 MiB
+with a +17.199 MiB/hour robust slope; median PSS changed by +48.85 MiB with
+a +9.156 MiB/hour slope. Neither material delta exceeded 128 MiB, so the
+unchanged gate did not flag sustained growth, but the baseline rise remains
+an unresolved observation. Descriptors changed by +3 and threads by zero.
+The same instance continues toward the full 24-hour acceptance; no leak-free
+or completed endurance verdict is claimed.
