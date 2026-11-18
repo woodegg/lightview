@@ -1187,9 +1187,176 @@ fallback library and the revised queue-budget library. After speculative
 preloads timed out, parsing issued additional requests for those resources.
 A diagnostic using the browser cache model completed in about forty seconds
 without those duplicate requests; that cache setting has not been adopted in
-the product. A private WebKit prototype attempting to reuse document-local
-preload timeout errors also failed the fixture, despite verified loading of
-the prototype in UI, network and page processes. That prototype remains
-unqualified and is not included in this repository's runtime patch. The
-document-level retry sequence remains unresolved; local transport passes do
-not establish a passing browser endurance result.
+the product. A private WebKit prototype intended to reuse document-local
+preload timeout errors also timed out, with its library mapped in UI, network
+and page processes. A subsequent diagnostic exposed a build error: it replaced
+a different unified compilation unit, so the library did not contain the
+loader change. Its timeout is therefore not a valid test of that proposed
+correction. The failed artifacts remain preserved, and a corrected build must
+verify the modified source dependency and generated code before running the
+fixture. Those private prototypes are not included in this repository's runtime
+patch. The document-level retry sequence remains unresolved; local transport
+passes do not establish a passing browser endurance result.
+
+The corrected diagnostic build verified the loader source in its dependency
+file and its diagnostic marker in both the object and linked library, in
+addition to all three process mappings. It completed the eighteen-script
+fixture in 80.105 seconds, still failing the unchanged fifty-second fixture
+gate. Nineteen HTTP/2 script requests were observed: only the second script
+was requested twice. Returning only already-delivered preload timeout errors
+therefore reduced duplication but did not resolve it. The remaining hypothesis
+is that parsing reaches a preload before its timeout callback is delivered.
+A follow-up prototype preserves the existing document preload handle across
+disabled-cache eviction and runs it through normal WebKit revalidation;
+it adds no persistent cache or document map.
+
+That document-preload prototype passed the unchanged eighteen-silent-script
+fixture in 40.063 seconds, with exactly eighteen initial HTTP/2 requests and
+no parser duplicates. The document completed parsing, ran its tail script
+and displayed the expected body. The sandbox stayed enabled, all three
+process roles mapped the intended engine, and no web process terminated.
+This is a controlled correction of the reproduced duplication, not proof
+that every live CDN delay has the same cause. A candidate without diagnostic
+output is now being built; fresh-document, reload, compatibility and full
+application qualification remain required before another live comparison.
+
+The candidate with diagnostic output removed also passed that fixture in
+40.058 seconds, again with eighteen initial requests and no duplicates or
+process termination. Its engine SHA-256 is
+`b44a25c0e0c07f3bdef491bd98737d2ff892fd3c21c7d8ab16b54e537598efe9`,
+paired with the queue-budget library above. Full application QA and a
+two-document check using the same script URLs have started independently.
+Both subsequently completed successfully: the two documents took 40.085 and
+40.062 seconds with 36 total initial script requests. All 25 verifier and 45
+integration tests passed with the intended engine mapped in UI, network and
+page processes under UID 1000, zero effective capabilities and NNP enabled.
+Additional healthy-script, credentials-mismatch, integrity-rejection and forced
+reload checks passed. The final queue-budget library also passed all eight
+public transport cases. Both runtime patches are now retained in the source
+tree as experimental candidates.
+
+Fresh-profile diagnostic `20261117-181111` started on display `:1` at about
+23:11 UTC, with main PID 1187445, a dedicated stable socket, all seventeen
+sites and the unchanged navigation and memory budgets. Its engine and Soup
+libraries are in independent prefixes, with startup H.264 decode, MSE and both
+WebGL contexts verified. Resource/navigation traces and whole-cgroup sampling
+are enabled; native and IPC metadata probes are armed only after a failed
+terminal verdict, using the new Soup fields and engine symbol address. This
+two-hour comparison is explicitly ineligible for formal endurance credit.
+The earlier failed runs remain failed, and a new full 24-hour acceptance run
+is still required.
+
+The repository's optional `tests/webkit_preload_reuse.py` now reproduces the
+same fault without private fixture dependencies. It shares the existing TLS
+server's certificate/protocol setup, verifies all three runtime mappings and
+pins its own and the server source hashes. The candidate passed both documents
+in 40.100 and 40.138 seconds. The same test with the preceding engine and the
+identical Soup library failed its single-document deadline with verified
+mappings and no fixture server errors. All eight transport regressions also
+passed after introducing the shared server extension point.
+
+A separate supervisor now waits for this diagnostic's terminal driver and
+independent audit. It may launch a fresh strict 24-hour instance only after
+checking the full two-hour duration, all seventeen destinations, every document,
+unchanged PID/socket/libraries, zero maintenance counters, no suspected resource
+growth, and the pinned public regression sources. The original short-window
+resource verdict is retained and cannot count as a formal pass. Any failed
+navigation or prerequisite stops advancement and preserves the diagnostic for
+analysis; there is no unchanged automatic retry. The formal launcher remains
+prepared, with tracing disabled and the original 24-hour/resource gates intact.
+
+A targeted follow-up checked cancellation after fallback response headers,
+when the header budget and parent-token bridge have already stopped. The
+existing response-body splice still uses the caller's original cancellable.
+The loopback server supplied HTTP/1.1 headers at 20.149 seconds but delayed
+the body; caller cancellation completed at 23.153 seconds, and a healthy probe
+on the same session succeeded at 23.201 seconds. Warmup, cancelled request and
+probe each completed exactly once, with no server errors. This additional
+check passed against the unchanged queue-budget library and required no runtime
+change or restart of the live diagnostic.
+
+A subsequent source review found a different header-budget boundary. A
+controlled request first stalls on HTTP/2, receives an HTTP/1.1 302 fallback
+at 20.108 seconds, then follows a redirect whose target remains silent.
+The existing candidate did not time out that target: the fixture had to abort
+at 54.990 seconds. Its `got-headers` handler had permanently stopped the budget
+on the 302, although Soup continued the same asynchronous send operation.
+This is a new component regression, not a failed navigation in the ongoing
+live comparison. Automatic advancement to formal endurance was stopped and
+qualification explicitly invalidated, with that live instance preserved.
+
+A separate successor now keeps the remaining header budget across redirect
+and authentication restarts. Its timer excludes paused periods and response
+body processing, and final header delivery still removes it before body reads.
+The new candidate is being built independently; the failing library and its
+test evidence remain unchanged. Redirect timeout/body preservation and the
+existing regression matrix must pass before it replaces the candidate.
+
+The redirected-header successor passed three targeted cases: an immediate
+redirect to a silent target timed out at 40.148 seconds; delaying the first
+redirect headers until 32.114 seconds still timed out at 40.143 seconds,
+showing that the redirect did not reset the remaining budget. A redirect
+response body delayed by twenty-five seconds completed normally, followed by
+the target response at 45.165 seconds. The existing compatibility matrix,
+queue/TLS/cancellation checks and eight public transport cases passed again.
+Nine upstream suites passed all 120 subtests in a dedicated network namespace
+with IPv4/IPv6 loopback. Their first run could not bind the host's absent IPv6
+loopback address; that infrastructure failure and its logs are preserved.
+Full application QA is running. The successor is not yet qualified for a
+replacement live comparison or formal endurance.
+
+The successor's full application QA subsequently passed all 25 verifier and
+45 integration tests, with its exact library mapped in all three process roles
+under UID 1000, NNP and zero effective capabilities. The repository transport
+suite now contains eleven cases, including all three redirect checks; all
+passed, while the preceding Soup library failed the same redirect-timeout
+control. The paired public preload fixture passed two documents in 40.138 and
+40.121 seconds. With that identical Soup library, the preceding engine still
+failed its single-document deadline. The new five-file patch was generated
+against the pristine 3.8.1 archive, applied without fuzz and verified byte for
+byte against the tested source. Its library SHA-256 is
+`37902860b806188489065d3a2576362fe3e0927fb29ea5c11cf6a2d92f68cfc5`.
+
+The preceding live comparison was then administratively retired to replace
+its network runtime. Its final CSV contains 579 healthy navigations across
+34 full rounds, with its last observed navigation start at 3,865.940 seconds.
+It recorded zero resets, rebuilds or automation timeouts and no navigation
+failure. That healthy partial observation remains incomplete, and is not
+retroactively converted into a failed navigation or a formal pass. The
+independent component failure and original profile/logs remain preserved.
+
+Fresh-profile diagnostic `20261117-191551` started on display `:1` at about
+00:16 UTC on November 18, with main PID 1265590 and an independent stable
+control socket. It pairs the unchanged preload engine with the redirect-aware
+Soup library, retaining all seventeen sites, normal mode, original budgets and
+zero-maintenance requirements. Startup H.264 decoding, MSE and both WebGL
+contexts passed. Its first complete site rotation verified successfully.
+Whole-cgroup sampling, independent audit and post-failure-only captures are
+active. A new supervisor may start a fresh strict 24-hour instance only after
+the completed two-hour comparison and pinned-source review pass; that formal
+launcher keeps tracing disabled and all original acceptance gates intact.
+
+During round 14 of the redirect-aware comparison, a slower Microsoft page
+passed document verification with an interactive document, 1,200 body elements
+and 33 body children. The next navigation began 44.463 seconds after that
+navigation started. Three first HTTP/2 recoveries occurred at about twenty-two
+seconds, followed by one HTTP/1.1 budget expiry about twenty seconds later.
+Generation stayed at one, with zero resets or automation timeouts. This is a
+preserved live recovery observation; native stream IDs are not directly mapped
+to the origin-only resource IDs, so timing correlation alone does not identify
+the exact blocking resource. Its twelve-second load-observation timeout is
+distinct from the sixty-second document/automation budget and does not change
+the passing document verdict or establish a complete endurance pass.
+
+The redirect-aware comparison's one-hour checkpoint recorded 563 healthy
+navigations across 33 full rounds, unchanged main PID/socket and zero resets,
+rebuilds, automation timeouts or maintenance recycles. All four pinned engine,
+Soup, decoder and executable hashes were unchanged. The network PID remained
+1265594 in the observed samples; whole-cgroup sampling was complete, without
+missing WebKit processes or OOM events. Nineteen twelve-second load-observation
+waits expired, but all subsequent document checks passed within the unchanged
+sixty-second verification budget. Post-warmup resource evidence covered only
+0.894 hours, below the required four-hour minimum. Early-to-late median PSS
+changed by -9.75 MiB, baseline by +49.352 MiB, descriptors by -19 and threads
+by -2; these observations do not establish leak-free endurance. The full
+24-hour acceptance remains outstanding.

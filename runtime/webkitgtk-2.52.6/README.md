@@ -14,6 +14,7 @@ The patches address independently reproduced problems:
 | `glib-ipc-inflight-retry.patch` | Preserve an IPC message after Linux `ETOOMANYREFS` and retry asynchronously after 10 ms. The socket can remain writable during this error, so a writable monitor alone is insufficient. |
 | `ipc-send-failure-diagnostics.patch` | Log existing fatal send/allocation returns without logging message contents, URLs, cookies, or request bodies. |
 | `sync-state-invalidation-cleanup.patch` | Remove an invalidated connection from the shared synchronous-message scheduling sets and queues before clearing its state pointer. Otherwise a deferred dispatch can skip cleanup and retain the closed connection and receive thread. |
+| `document-preload-reuse.patch` | Preserve a matching document-local script or stylesheet preload across disabled shared-cache eviction, then apply normal revalidation. This avoids another parser request after a preload exhausts its transport retry. |
 
 The IPC fix does not raise file-descriptor limits. The cleanup fix does not
 restart NetworkProcess. The loop fix does not disable media, Media Source,
@@ -26,13 +27,14 @@ the [Ubuntu source archive](https://archive.ubuntu.com/ubuntu/pool/main/w/webkit
 Its `webkit2gtk_2.52.6.orig.tar.xz` SHA-256 is
 `179a2ea3f8f6edd4be7f31fdc55afc57bd0729f1fba648c61d4181539ac116fc`.
 Extract the source package with `dpkg-source -x` so the distribution patches
-are applied, then apply the five patches in this order:
+are applied, then apply the six patches in this order:
 
 1. `disable-segmented-loop-seeking.patch`
 2. `ipc-send-failure-diagnostics.patch`
 3. `soup-detached-keepalive-cleanup.patch`
 4. `glib-ipc-inflight-retry.patch`
 5. `sync-state-invalidation-cleanup.patch`
+6. `document-preload-reuse.patch`
 
 Each patch uses paths relative to the extracted source root and applies with
 `patch -p1`. Keep that patched source and the build configuration with any
@@ -149,3 +151,57 @@ executables, and verify the engine mappings in all process types; a child
 executable's RPATH can otherwise select an older runtime. Passing this regression
 does not establish a healthy 24-hour run or resolve intermittent page-loading
 stalls.
+
+## Document-local preload reuse
+
+With the document-viewer cache model, parsing could request a speculative
+preload again after its transport timeout. Eighteen permanently silent scripts
+kept the controlled document unfinished beyond 95 seconds. Reusing only
+already-delivered timeout errors still took 80.105 seconds: parsing can reach
+the next preload before its timeout callback runs. The current patch retains
+the existing preload handle for that request and passes it through normal
+WebKit revalidation, including cache policy, resource type, Vary, encoding and
+service-worker checks. Credentials, fetch mode, cookies and authorization must
+also match. It adds no persistent map or shared cache and preserves explicit
+reload behavior.
+
+The candidate completed the unchanged fixture in 40.058 seconds, with exactly
+eighteen initial requests and no parser duplicates. Two consecutive documents
+using the same script URLs each completed around forty seconds with 36 total
+initial requests. Healthy scripts, differing credentials, integrity rejection
+and forced reload passed, as did 25 verifier and 45 integration tests. The
+engine SHA-256 is
+`b44a25c0e0c07f3bdef491bd98737d2ff892fd3c21c7d8ab16b54e537598efe9`,
+paired with the Soup queue-budget candidate. Its source dependency and compiled
+change were checked as well as runtime mappings in all three process roles.
+A new seventeen-site live comparison is running; no 24-hour pass is claimed.
+
+The optional loopback regression is now in the repository. Run it as an
+unprivileged user with a working WebKit sandbox and matching runtime/helper
+installation. It needs Python GI GTK/WebKit bindings, `h2`, OpenSSL,
+`dbus-run-session` and Xvfb. Include any separately installed JavaScriptCore
+dependency in `LD_LIBRARY_PATH` before running:
+
+```sh
+/usr/bin/python3 tests/webkit_preload_reuse.py \
+  --engine-prefix /path/to/independent-webkit-prefix \
+  --library /path/to/independent-soup/lib/libsoup-3.0.so.0.8.1 \
+  --output-dir /tmp/lightview-preload-regression
+```
+
+Use a new output directory. By default it checks two documents with the same
+eighteen script URLs, taking about eighty seconds. All script responses remain
+silent on both protocols; each page must finish within fifty seconds, run its
+tail script and display its body. Wire counts reject duplicate parser requests.
+The test verifies selected engine/Soup mappings in the UI and both WebKit
+process types, records source/library hashes, and preserves logs. A single-page
+control using the preceding engine with the same Soup library times out;
+`--pages 1` selects that shorter check. Neither result supplies endurance or
+resource-growth acceptance.
+
+The paired redirect-aware Soup successor also passed this same two-document
+test in 40.138 and 40.121 seconds, with the unchanged engine above. The
+preceding-engine control timed out with that identical Soup library. Full
+application QA again passed 25 verifier and 45 integration tests. A fresh live
+comparison is running with the two locally qualified components; its result
+must not be confused with a completed endurance acceptance.

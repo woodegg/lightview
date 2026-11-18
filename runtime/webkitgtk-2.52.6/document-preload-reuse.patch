@@ -1,0 +1,23 @@
+--- a/Source/WebCore/loader/cache/CachedResourceLoader.cpp
++++ b/Source/WebCore/loader/cache/CachedResourceLoader.cpp
+@@ -1246,0 +1247,15 @@
++    CachedResourceHandle<CachedResource> documentPreload;
++    // Preserve this document's existing preload across disabled shared-cache
++    // eviction. Use the normal revalidation path for type, Vary, encoding,
++    // service-worker, cache-policy and security checks.
++    if (memoryCache->disabled() && request.allowsCaching()
++        && forPreload == ForPreload::No && document && !document->loadEventFinished()
++        && m_preloads && (type == CachedResource::Type::Script || type == CachedResource::Type::CSSStyleSheet)) {
++        if (auto* preload = cachedResource(url); preload && preload->type() == type
++            && preload->isPreloaded() && m_preloads->contains(*preload)
++            && preload->options().credentials == request.options().credentials
++            && preload->options().mode == request.options().mode
++            && preload->resourceRequest().allowCookies() == request.resourceRequest().allowCookies()
++            && preload->resourceRequest().httpHeaderField(HTTPHeaderName::Authorization) == request.resourceRequest().httpHeaderField(HTTPHeaderName::Authorization))
++            documentPreload = preload;
++    }
+@@ -1260,0 +1276,4 @@
++
++    if (!resource && documentPreload) {
++        resource = documentPreload;
++    }

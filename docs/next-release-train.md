@@ -410,9 +410,22 @@ preceding library and pass against that candidate. Its full seventeen-site
 live diagnostic then failed after about 61 minutes on another head-only
 Microsoft document. A native snapshot and local two-connection-pool regression
 showed that queueing was outside the fallback's header timer, producing timeout
-batches at approximately 41, 62 and 83 seconds. A private correction covering
-that queue/connect wait is under development; it has not qualified for another
-live or formal attempt. The full endurance gate remains unmet.
+batches at approximately 41, 62 and 83 seconds. The queue/connect budget
+correction then passed the transport, cancellation and full application checks.
+A stronger eighteen-script browser fixture exposed duplicate parser requests
+after failed preloads. Preserving matching document-local preloads completed
+that fixture in about forty seconds, with fresh-document, credentials, integrity
+and reload checks also passing. The paired runtime passed 25 verifier and 45
+integration tests and has started a fresh seventeen-site diagnostic comparison.
+That comparison remained healthy but a separate redirect regression found the
+header timer stopped before a redirected request ran. Its successor retains
+the remaining budget across redirects while excluding response-body time.
+Three redirect cases, the compatibility matrix, eleven public transport cases,
+120 upstream subtests, 25 verifier and 45 integration tests passed. The paired
+preload regression passed again with verified failing predecessor controls.
+The earlier live comparison was preserved as administratively retired and
+incomplete after 579 healthy navigations; a fresh seventeen-site comparison is
+now running. These are not formal 24-hour attempts. The full gate remains unmet.
 The V3 candidate completed a full 24-hour navigation run on November 10--11,
 but failed acceptance because descriptor and thread counts grew materially.
 The recorded evidence and distinction from a passing run are documented in

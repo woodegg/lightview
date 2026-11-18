@@ -1,79 +1,14 @@
 --- a/libsoup/http1/soup-client-message-io-http1.c
 +++ b/libsoup/http1/soup-client-message-io-http1.c
-@@ -44,0 +45,7 @@
-+        /* Only the single fallback from the HTTP/2 header guard is timed. */
+@@ -44,0 +45,3 @@
 +        /* Borrowed from the pending async dispatch; cleared while it runs. */
 +        GTask *read_task;
-+        GSource *fallback_headers_source;
-+        gint64 fallback_headers_started_us;
-+        gboolean fallback_headers_timed_out;
 +
-@@ -65,0 +73,40 @@
-+stop_fallback_headers_source (SoupMessageIOHTTP1 *msg_io)
-+{
-+        if (!msg_io->fallback_headers_source)
-+                return;
-+        g_source_destroy (msg_io->fallback_headers_source);
-+        g_clear_pointer (&msg_io->fallback_headers_source, g_source_unref);
-+}
-+
-+static gboolean
-+fallback_headers_source_cb (SoupClientMessageIOHTTP1 *client_io)
-+{
-+        SoupMessageIOHTTP1 *msg_io = client_io->msg_io;
-+        SoupMessageIOData *io = &msg_io->base;
-+        gint64 now = g_get_monotonic_time ();
-+
-+        if (io->read_state > SOUP_MESSAGE_IO_STATE_HEADERS) {
-+                stop_fallback_headers_source (msg_io);
-+                return G_SOURCE_REMOVE;
-+        }
-+        if (io->paused || io->write_state != SOUP_MESSAGE_IO_STATE_DONE) {
-+                msg_io->fallback_headers_started_us = 0;
-+                return G_SOURCE_CONTINUE;
-+        }
-+        if (!msg_io->fallback_headers_started_us) {
-+                msg_io->fallback_headers_started_us = now;
-+                return G_SOURCE_CONTINUE;
-+        }
-+        if (now - msg_io->fallback_headers_started_us < 20 * G_USEC_PER_SEC)
-+                return G_SOURCE_CONTINUE;
-+        msg_io->fallback_headers_timed_out = TRUE;
-+        client_io->is_reusable = FALSE;
-+        /* Wake the existing task through its normal I/O dispatch. Never cancel
-+         * a caller-owned GCancellable or complete its task from this timer. */
-+        if (io->io_source)
-+                g_source_set_ready_time (io->io_source, 0);
-+        stop_fallback_headers_source (msg_io);
-+        return G_SOURCE_REMOVE;
-+}
-+
-+static void
-@@ -67,0 +115 @@
-+        stop_fallback_headers_source (msg_io);
-@@ -730 +778,5 @@
--        else if (!io) {
-+        else if (client_io->msg_io->fallback_headers_timed_out) {
-+                g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_TIMED_OUT,
-+                                     "HTTP/1.1 fallback response headers stalled after one retry");
-+                return FALSE;
-+        } else if (!io) {
-@@ -925,0 +978 @@
+@@ -925,0 +929 @@
 +        client_io->msg_io->read_task = NULL;
-@@ -942,0 +996 @@
+@@ -942,0 +947 @@
 +                client_io->msg_io->read_task = task;
-@@ -974,0 +1029,10 @@
-+        if (g_object_get_data (G_OBJECT (msg), "soup-http2-response-headers-retried") &&
-+            !io->msg_io->fallback_headers_source) {
-+                io->msg_io->fallback_headers_source = g_timeout_source_new (1000);
-+                g_source_set_static_name (io->msg_io->fallback_headers_source,
-+                                          "Soup HTTP/1.1 fallback response headers guard");
-+                g_source_set_callback (io->msg_io->fallback_headers_source,
-+                                       (GSourceFunc)fallback_headers_source_cb, io, NULL);
-+                g_source_attach (io->msg_io->fallback_headers_source,
-+                                 g_main_context_get_thread_default ());
-+        }
-@@ -1080,0 +1145,12 @@
+@@ -1080,0 +1086,12 @@
 +        if (io->msg_io->read_task) {
 +                GTask *task = io->msg_io->read_task;
 +                /* A pause outside the I/O callback removed its dispatch source.
@@ -86,7 +21,7 @@
 +                g_source_set_priority (io->msg_io->base.io_source, g_task_get_priority (task));
 +                g_source_attach (io->msg_io->base.io_source, g_main_context_get_thread_default ());
 +        }
-@@ -1092,0 +1169,2 @@
+@@ -1092,0 +1110,2 @@
 +        if (io->msg_io->read_task && io->msg_io->base.io_source)
 +                g_source_set_ready_time (io->msg_io->base.io_source, 0);
 --- a/libsoup/http2/soup-client-message-io-http2.c
@@ -186,8 +121,8 @@
 +                io->headers_unresponsive = TRUE;
 +                if (!g_object_get_data (G_OBJECT (data->msg), HEADERS_RETRY_KEY)) {
 +                        g_object_set_data (G_OBJECT (data->msg), HEADERS_RETRY_KEY, GINT_TO_POINTER (1));
-+                        /* Experimental per-message fallback. Not qualified until
-+                         * a silent HTTP/1.1 replacement is also bounded. */
++                        /* Bound the entire single fallback, including queued work. */
++                        soup_message_queue_item_start_header_fallback (data->item);
 +                        soup_message_set_force_http_version (data->msg, SOUP_HTTP_1_1);
 +                        data->can_be_restarted = TRUE;
 +                        set_error_for_data (data, g_error_new_literal (G_IO_ERROR, G_IO_ERROR_CONNECTION_CLOSED,
@@ -256,7 +191,122 @@
 @@ -2114,0 +2260,2 @@
 +
 +        stop_headers_wait_source (io);
+--- a/libsoup/soup-message-queue-item.c
++++ b/libsoup/soup-message-queue-item.c
+@@ -42,0 +43,89 @@
++stop_fallback_budget (SoupMessageQueueItem *item)
++{
++        if (!item->fallback_budget_source)
++                return;
++        g_source_destroy (item->fallback_budget_source);
++        g_clear_pointer (&item->fallback_budget_source, g_source_unref);
++}
++
++void
++soup_message_queue_item_stop_header_fallback (SoupMessageQueueItem *item)
++{
++        stop_fallback_budget (item);
++        if (item->fallback_parent_cancel_source) {
++                g_source_destroy (item->fallback_parent_cancel_source);
++                g_clear_pointer (&item->fallback_parent_cancel_source, g_source_unref);
++        }
++
++}
++
++static gboolean
++fallback_parent_cancelled (GCancellable *parent, SoupMessageQueueItem *item)
++{
++        GCancellable *child = g_object_ref (item->cancellable);
++        soup_message_queue_item_ref (item);
++        g_cancellable_cancel (child);
++        /* Queued work has no socket source to wake when it is cancelled. */
++        soup_session_kick_queue (item->session);
++        g_object_unref (child);
++        soup_message_queue_item_unref (item);
++        return G_SOURCE_REMOVE;
++}
++
++static gboolean
++fallback_budget_expired (SoupMessageQueueItem *item)
++{
++        gint64 now = g_get_monotonic_time ();
++        gint64 elapsed = now - item->fallback_last_check_us;
++        item->fallback_last_check_us = now;
++        if (item->state == SOUP_MESSAGE_FINISHING || item->state == SOUP_MESSAGE_FINISHED ||
++            g_cancellable_is_cancelled (item->cancellable)) {
++                stop_fallback_budget (item);
++                return G_SOURCE_REMOVE;
++        }
++        /* Redirect/auth response bodies may be drained before this same send
++         * operation restarts. Preserve the remaining header budget across
++         * that restart without timing a body that is making progress. Normal
++         * final headers stop the source in async_send_request_return_result. */
++        if (item->paused || soup_message_get_status (item->msg) >= 200)
++                return G_SOURCE_CONTINUE;
++        item->fallback_remaining_us -= elapsed;
++        if (item->fallback_remaining_us > 0)
++                return G_SOURCE_CONTINUE;
++
++        /* The operation, including connection-pool and handshake waits, owns
++         * one budget. Only its private cancellable is cancelled. */
++        soup_message_queue_item_ref (item);
++        item->fallback_timed_out = TRUE;
++        stop_fallback_budget (item);
++        g_message ("HTTP/1.1 fallback budget expired: state=%d", item->state);
++        g_cancellable_cancel (item->cancellable);
++        soup_session_kick_queue (item->session);
++        soup_message_queue_item_unref (item);
++        return G_SOURCE_REMOVE;
++}
++
++void
++soup_message_queue_item_start_header_fallback (SoupMessageQueueItem *item)
++{
++        GCancellable *child;
++        if (!item->async || item->fallback_budget_source)
++                return;
++        child = g_cancellable_new ();
++        item->fallback_parent_cancel_source = g_cancellable_source_new (item->cancellable);
++        g_source_set_callback (item->fallback_parent_cancel_source,
++                               (GSourceFunc)fallback_parent_cancelled,
++                               item, NULL);
++        g_source_attach (item->fallback_parent_cancel_source, item->context);
++        g_object_unref (item->cancellable);
++        item->cancellable = child;
++        item->fallback_remaining_us = 20 * G_USEC_PER_SEC;
++        item->fallback_last_check_us = g_get_monotonic_time ();
++        item->fallback_budget_source = g_timeout_source_new (250);
++        g_source_set_static_name (item->fallback_budget_source, "Soup fallback response headers budget");
++        g_source_set_callback (item->fallback_budget_source,
++                               (GSourceFunc)fallback_budget_expired, item, NULL);
++        g_source_attach (item->fallback_budget_source, item->context);
++}
++
++static void
+@@ -44,0 +134 @@
++        soup_message_queue_item_stop_header_fallback (item);
+--- a/libsoup/soup-message-queue-item.h
++++ b/libsoup/soup-message-queue-item.h
+@@ -34,0 +35,6 @@
++        GSource *fallback_budget_source;
++        GSource *fallback_parent_cancel_source;
++        gint64 fallback_remaining_us;
++        gint64 fallback_last_check_us;
++        gboolean fallback_timed_out;
++
+@@ -58,0 +65,3 @@
++
++void soup_message_queue_item_start_header_fallback (SoupMessageQueueItem *item);
++void soup_message_queue_item_stop_header_fallback (SoupMessageQueueItem *item);
 --- a/libsoup/soup-session.c
 +++ b/libsoup/soup-session.c
 @@ -1394,0 +1395 @@
 +        g_object_set_data (G_OBJECT (msg), "soup-http2-response-headers-retried", NULL);
+@@ -2783,0 +2785,7 @@
++
++        soup_message_queue_item_stop_header_fallback (item);
++        if (item->fallback_timed_out) {
++                g_clear_error (&error);
++                error = g_error_new_literal (G_IO_ERROR, G_IO_ERROR_TIMED_OUT,
++                                             "HTTP/1.1 fallback response headers stalled after one retry (queue/connect budget expired)");
++        }
