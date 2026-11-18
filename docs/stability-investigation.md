@@ -1507,3 +1507,94 @@ unchanged gate did not flag sustained growth, but the baseline rise remains
 an unresolved observation. Descriptors changed by +3 and threads by zero.
 The same instance continues toward the full 24-hour acceptance; no leak-free
 or completed endurance verdict is claimed.
+
+The seven-hour checkpoint recorded 3,502 healthy navigations and 206 complete
+rounds. All eight runtime/monitor units were live, all four pinned hashes
+matched, main PID/socket and observed network PID remained unchanged, and
+all 421 whole-cgroup samples were complete without sampling errors, missing
+workers or OOM events. Resets, rebuilds, automation timeouts and maintenance
+recycles remained zero. There were 162 twelve-second load-observation
+expirations, each followed by successful document verification. Comparable
+post-warmup coverage reached 6.254 hours. Baseline PSS changed by +83.399 MiB
+with a +17.608 MiB/hour robust slope; median PSS changed by +41.8 MiB with
+a +7.753 MiB/hour slope. Descriptors changed by +5.5 and threads by +1.
+The unchanged growth gate did not flag sustained material growth, but the
+positive baseline trend remains unresolved. The same instance continues;
+the full 24-hour endurance and resource acceptance remain outstanding.
+
+The eight-hour checkpoint recorded 4,014 healthy navigations and 236 complete
+rounds. All eight runtime/monitor units were live, all four pinned hashes
+matched, main PID/socket and observed network PID remained unchanged, and
+all 480 whole-cgroup samples were complete without sampling errors, missing
+workers or OOM events. Resets, rebuilds, automation timeouts and maintenance
+recycles remained zero. There were 184 twelve-second load-observation
+expirations, each followed by successful document verification. Comparable
+post-warmup coverage reached 7.135 hours. Baseline PSS changed by +81.68 MiB
+with a +15.546 MiB/hour robust slope; median PSS changed by +17.85 MiB with
+a +5.228 MiB/hour slope. Descriptors changed by +6 and threads by +1.
+The unchanged growth gate did not flag sustained material growth. The
+baseline delta has fluctuated below its earlier peak, but its positive
+trend remains unresolved; this is not proof of leak-free endurance.
+The same instance continues toward the original full 24-hour acceptance.
+
+The nine-hour checkpoint recorded 4,591 healthy navigations and 270 complete
+rounds. All eight runtime/monitor units were live, all four pinned hashes
+matched, main PID/socket and observed network PID remained unchanged, and
+all 541 whole-cgroup samples were complete without sampling errors, missing
+workers or OOM events. Resets, rebuilds, automation timeouts and maintenance
+recycles remained zero. There were 195 twelve-second load-observation
+expirations, each followed by successful document verification. Comparable
+post-warmup coverage was 7.995 hours after the automatic warmup-window step.
+Baseline PSS changed by +84.667 MiB with a +14.41 MiB/hour robust slope;
+median PSS changed by +31.87 MiB with a +6.375 MiB/hour slope. Descriptors
+changed by +3 and threads by +1. The unchanged growth gate did not flag
+sustained material growth, but the positive baseline trend remains
+unresolved. The same instance continues; the complete 24-hour endurance
+and resource acceptance remain outstanding.
+
+Formal attempt `20261117-211752` terminated after 32,681.435 seconds
+(9 hours, 4 minutes, 41 seconds), with 4,627 healthy navigations out of 4,628.
+The Facebook navigation in round 273 lost its control connection. Its
+original driver and independent audit both remain failed, including the
+changed main PID/socket and unmet 24-hour duration. This is not a passing
+endurance result.
+
+The host's unattended-upgrade log explicitly recorded `needrestart` running
+`systemctl restart` against this exact browser service after upgrading
+GStreamer base/GL packages from Ubuntu revision `.6` to `.7`. The system
+journal confirms an explicit stop/start, with `Restart=no` and zero automatic
+service restarts. The original UI process was still present in the final
+whole-cgroup sample immediately before the stop; post-failure native capture
+could not inspect it after it exited. No crash or OOM mechanism was established.
+The resource gate did not flag sustained material growth: baseline PSS delta
+was +85.446 MiB and median PSS delta +30.82 MiB across 8.068 comparable hours.
+The positive baseline trend remains unresolved independently of this restart.
+
+The test-host correction is a narrowly scoped `needrestart` restart-selection
+override for timestamped `lightview-redirect-budget-24h-*` browser and monitor
+units. The reusable snippet is `tools/lightview-endurance-needrestart.conf`;
+install it as `/etc/needrestart/conf.d/lightview-endurance.conf` on the test
+host. Ordinary Lightview services and unrelated host services retain their
+existing restart policy, and package updates remain enabled. The interrupted
+attempt and its unsolicited replacement were retired after evidence capture.
+Requalification against the updated GStreamer environment is required before
+a fresh, full-duration attempt; no runtime thresholds or site coverage change.
+
+Post-upgrade requalification passed all 25 runner checks and 45 application
+integration tests (233.087 seconds), including standalone media navigation.
+Read-only process mappings confirmed the pinned engine/Soup in all three
+roles with UID 1000, no effective capabilities and `NoNewPrivs=1`. Loading
+the actual host `needrestart` configuration and applying its service-selection
+logic verified that all eight dedicated browser/monitor unit names changed
+from selected to deferred; four non-target names remained outside this rule.
+The configuration check invoked no service restart.
+
+Fresh formal attempt `20261118-063038` then started on display `:1` with
+main PID 1972936, a fresh persistent profile/socket, the same qualified
+browser/private runtime bytes, Normal mode and the original 86,400-second
+seventeen-site gates. Its manifest records the updated GStreamer package
+versions, restart-policy hash and post-upgrade qualification. Actual media
+decode/plugin mapping, MSE and WebGL 1/2 startup checks passed. All eight
+browser/test/monitor units were live and its first complete seventeen-site
+rotation was healthy. No endurance or leak-free pass is claimed; the fresh
+attempt must satisfy the full duration and resource gates independently.
