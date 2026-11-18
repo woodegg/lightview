@@ -21,8 +21,10 @@ import time
 
 PAYLOAD = b"guard-ok"
 INTERACTION_CASES = ("coalesced", "body-preserved")
+REDIRECT_CASES = ("redirect-timeout", "redirect-delayed-headers", "redirect-body")
 CASES = (*INTERACTION_CASES, "protocol-fallback", "fallback-timeout",
-         "fallback-body", "fallback-cancel", "fallback-forbidden", "ordinary-http1")
+         "fallback-body", "fallback-cancel", "fallback-forbidden", "ordinary-http1",
+         *REDIRECT_CASES)
 
 
 def digest(path):
@@ -107,10 +109,10 @@ class Server:
                         if not self.stopped:
                             self.errors.append(repr(error))
 
-                def respond(stream, payload, delayed_body=False):
+                def respond(stream, payload, delayed_body=False, content_type="text/plain"):
                     with lock:
                         state.send_headers(stream, [
-                            (":status", "200"), ("content-type", "text/plain"),
+                            (":status", "200"), ("content-type", content_type),
                             ("content-length", str(len(payload))),
                         ])
                         connection.sendall(state.data_to_send())
@@ -148,6 +150,8 @@ class Server:
                                 })
                                 if path == "/warm":
                                     self.warm_connection = identity
+                            if self.handle_http2_request(path, event.stream_id, respond):
+                                continue
                             if path == "/warm":
                                 respond(event.stream_id, b"warm")
                             elif path == "/late" and self.case == "body-preserved":
@@ -162,6 +166,10 @@ class Server:
                 self.errors.append(repr(error))
         finally:
             raw.close()
+
+    def handle_http2_request(self, path, stream, respond):
+        """Allow browser fixtures to reuse the same TLS/protocol server."""
+        return False
 
     def serve_http1(self, connection, identity):
         request = b""
@@ -178,11 +186,24 @@ class Server:
         if self.stopped:
             return
         method, path, _ = request.split(b"\r\n", 1)[0].decode("ascii").split(" ", 2)
-        if method != "GET" or path not in ("/warm", "/first", "/late"):
+        if method != "GET" or path not in ("/warm", "/first", "/late", "/redirect"):
             raise RuntimeError("Unexpected fixture request")
         with self.lock:
             self.requests.append({"connection": identity, "protocol": "http/1.1",
                                   "path": path, "at": time.monotonic()})
+        if self.case in REDIRECT_CASES and path == "/first":
+            if self.case == "redirect-delayed-headers" and self.stop_event.wait(12):
+                return
+            body = b"redirect" if self.case == "redirect-body" else b""
+            connection.sendall(b"HTTP/1.1 302 Found\r\nLocation: /redirect\r\n"
+                               b"Content-Length: " + str(len(body)).encode() +
+                               b"\r\nConnection: close\r\n\r\n")
+            if body and not self.stop_event.wait(25):
+                connection.sendall(body)
+            return
+        if path == "/redirect" and self.case != "redirect-body":
+            self.stop_event.wait(60)
+            return
         if path != "/warm" and self.case in ("fallback-timeout", "fallback-cancel"):
             self.stop_event.wait(60)
             return
@@ -245,6 +266,10 @@ def client(port, certificate, case):
         message.connect("accept-certificate", lambda _m, peer, _errors:
                         peer.is_same(expected_certificate))
         message.connect("wrote-headers", wrote_headers)
+        message.connect("got-headers", lambda current:
+                        report.setdefault("headers", {}).setdefault(name, []).append({
+                            "status": current.get_status(),
+                            "seconds": round(time.monotonic() - started, 3)}))
 
         def finished(_session, result):
             try:
@@ -326,6 +351,31 @@ def check_fallback(case, first, requests, warm_requests, result):
             (44 < seconds < 50 if case == "fallback-body" else 19 < seconds < 25))
 
 
+def check_redirect(case, first, requests, redirects, warm_requests, result):
+    ids = result.get("connections", {}).get("first", [])
+    warm = result["results"].get("warm", {})
+    headers = result.get("headers", {}).get("first", [])
+    wire_ok = (len(requests) == 2 and len(redirects) == 1 and
+               [r["protocol"] for r in requests] == ["h2", "http/1.1"] and
+               redirects[0]["protocol"] == "http/1.1" and
+               warm_requests[0]["protocol"] == "h2" and
+               requests[0]["connection"] == warm_requests[0]["connection"] and
+               len({requests[0]["connection"], requests[1]["connection"],
+                    redirects[0]["connection"]}) == 3 and
+               len(ids) == 3 and len(set(ids)) == 3 and ids[0] == warm.get("connection"))
+    if not wire_ok:
+        return False
+    if case == "redirect-body":
+        return ([h["status"] for h in headers] == [302, 200] and
+                first.get("status") == 200 and ids[-1] == first.get("connection") and
+                first.get("sha256") == hashlib.sha256(PAYLOAD).hexdigest() and
+                44 < first.get("seconds", 999) < 51)
+    return ([h["status"] for h in headers] == [302] and first.get("timed_out") and
+            39 < first.get("seconds", 999) < 45 and
+            (31 < headers[0]["seconds"] < 35 if case == "redirect-delayed-headers"
+             else 19 < headers[0]["seconds"] < 25))
+
+
 def check_case(case, output, library):
     output.mkdir()
     server = Server(output, case)
@@ -343,6 +393,7 @@ def check_case(case, output, library):
         requests = server.requests.copy()
         warm_requests = [r for r in requests if r["path"] == "/warm"]
         first_requests = [r for r in requests if r["path"] == "/first"]
+        redirect_requests = [r for r in requests if r["path"] == "/redirect"]
         late_requests = [r for r in requests if r["path"] == "/late"]
         first, late = (result["results"].get(name, {}) for name in ("first", "late"))
         warm = result["results"].get("warm", {})
@@ -353,6 +404,11 @@ def check_case(case, output, library):
                        warm.get("sha256") == hashlib.sha256(b"warm").hexdigest() and
                        len(warm_requests) == 1 and not server.errors and
                        not any(marker in process.stderr for marker in ("WARNING", "CRITICAL")))
+        if case in REDIRECT_CASES:
+            passed = base_passed and check_redirect(
+                case, first, first_requests, redirect_requests, warm_requests, result)
+            return {"case": case, "passed": bool(passed), "client": result,
+                    "server_requests": requests, "server_errors": server.errors}
         if case not in INTERACTION_CASES:
             passed = base_passed and check_fallback(case, first, first_requests,
                                                    warm_requests, result)

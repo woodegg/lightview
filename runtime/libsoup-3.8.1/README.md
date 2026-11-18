@@ -104,10 +104,12 @@ requests finish, and restarts the eligible request once on a fresh
 connection. Once a connection is known to be unresponsive, other eligible
 requests already waiting on it enter the same bounded recovery on the next
 check, without waiting for each stream's separate 20-second deadline. The
-single retry uses HTTP/1.1 for that message. Its response-header wait is also
-bounded after the request has been written, excluding paused time; a silent
-fallback reports a timeout without another guard retry. These header deadlines
-do not impose a total deadline on queueing, connection setup or response bodies.
+single retry uses HTTP/1.1 for that message. Its separate twenty-second budget
+covers connection-pool queueing, connection establishment and response headers,
+excluding paused time. Expiry cancels an internal child token and wakes the
+session queue, preserving the caller's token. Caller cancellation also wakes
+the queue immediately. The budget stops when final response headers arrive;
+it does not bound response bodies or ordinary HTTP/1.1 requests.
 Normal requests continue to negotiate HTTP/2. Received responses, including
 HTTP 403, are not retried by this guard. A separate cancellation source wakes
 the owner context even if the peer sends nothing.
@@ -119,7 +121,7 @@ prefix with the existing build options:
 patch --batch --fuzz=0 -p1 < /path/to/http2-response-header-recovery.patch
 ```
 
-The patch uses zero context lines and was checked to reproduce all three candidate
+The patch uses zero context lines and was checked to reproduce all five candidate
 source files byte for byte. Keep the baseline runtime intact.
 This changes neither HTTP/2/IPv6/media support nor Lightview's process,
 control socket, memory thresholds, or process-recycling policy. Recovery
@@ -136,7 +138,7 @@ It subsequently failed a strict attempt after 4 h 14 min: requests on its
 replacement HTTP/2 connection also stalled, and Microsoft parsing exceeded
 60 seconds. Its later completion does not change that failure.
 
-The current candidate adds the per-message HTTP/1.1 fallback and restores the
+The preceding candidate added the per-message HTTP/1.1 fallback and restored the
 pending asynchronous read dispatch when an HTTP/1.1 request is externally
 paused and resumed. The pause defect was also reproduced against the preceding
 library's ordinary HTTP/1.1 path; its relevance to the live Microsoft delay
@@ -147,16 +149,53 @@ Six focused fallback cases, eleven transport fault cases, two recovery
 interactions, three native pause/cancel cases, ninety cancellation stress
 requests, nine upstream suites (120 subtests), 25 verifier checks and 45
 Lightview integration checks passed. A sandboxed parser also executed its
-critical and late-added scripts after recovery. The tested current library
+critical and late-added scripts after recovery. That tested library's
 SHA-256 is
 `6da7e5824d923a6c5c6b0136616bcdfdf82e23c9281678d17128ccc3292007fa`.
 The live comparison subsequently failed after about 61 minutes: queued
 fallbacks were outside the post-write header timer, allowing completion batches
-at approximately 41, 62 and 83 seconds. The patch in this directory still
-represents that experimental candidate. A private correction bounding queueing
-and connection establishment is under qualification; it has not replaced this
-patch or qualified for another live attempt. The full seventeen-site endurance
-and resource-growth audit remains required.
+at approximately 41, 62 and 83 seconds.
+
+The current patch includes the queue/connect/header budget correction. Six
+silent requests through a two-connection pool now expire together around
+40.2 seconds. Stalled TLS establishment and cancellation of a queued request
+also pass, leaving the caller's token usable. The compatibility matrix,
+ninety cancellation stress requests, nine upstream suites (120 subtests),
+eight portable transport cases and full application QA passed. Its tested
+library SHA-256 is
+`8f505c31bb16442681cf9d0aeb0a134b664b6a3667d1749e4211e6bef3be68cf`.
+
+A separate targeted check cancels a delayed response body after fallback
+headers have arrived. Cancellation completed around 23.2 seconds, followed
+by a successful probe on the same session; each callback ran exactly once.
+The ordinary body-read path retains the caller's cancellable after the
+header-phase bridge is removed.
+
+That candidate later failed a targeted redirect check: its HTTP/1.1 302
+response stopped the timer before the redirected request ran. A silent target
+needed the fixture's forced abort at about 55 seconds. Automatic advancement
+to formal endurance was stopped, preserving that failure and its live evidence.
+
+The patch now retains the remaining budget across redirect/authentication
+restarts, excluding paused periods and response-body processing. Silent
+redirect targets time out around forty seconds even if earlier redirect
+headers arrive late; a slow redirect body still completes normally. The
+compatibility matrix, queue/TLS/cancellation checks, eleven public transport
+cases, nine upstream suites (120 subtests), 25 verifier and 45 integration
+tests passed. Its library SHA-256 is
+`37902860b806188489065d3a2576362fe3e0927fb29ea5c11cf6a2d92f68cfc5`.
+The paired preload regression also passed two documents around forty seconds
+each, with the preceding engine and Soup controls reproducing their failures.
+A fresh seventeen-site comparison is running with that exact library and the
+preload-corrected engine. The unchanged full 24-hour gate remains required.
+
+A stronger eighteen-script browser fixture exposed a further document-level
+preload retry sequence. The separate
+[WebKit preload correction](../webkitgtk-2.52.6/document-preload-reuse.patch),
+paired with this library, completed that fixture in about forty seconds and
+passed fresh-document and compatibility checks. A new seventeen-site live
+comparison is running. The full endurance and resource-growth audit remains
+required; these local checks do not establish a 24-hour pass.
 
 ## Reproducing transport recovery
 
@@ -177,7 +216,7 @@ new output directory:
 ```
 
 If `h2` is installed in an isolated test directory, include that directory in
-`PYTHONPATH`. By default eight cases run concurrently in about 46 seconds. The
+`PYTHONPATH`. By default eleven cases run concurrently in about 46 seconds. The
 first starts a second request seventeen seconds into a stalled connection and
 requires both responses before 25 seconds. The second confirms that a response
 whose headers already arrived stays on the original connection and delivers
@@ -186,6 +225,10 @@ connection remains silent, a silent fallback's timeout, caller cancellation,
 a delayed HTTP/1.1 response body, HTTP 403 preservation and an ordinary
 HTTP/1.1 response whose headers take 25 seconds. Use `--case protocol-fallback`
 to isolate the new recovery limitation against the preceding library.
+Redirect cases verify a silent target, delayed redirect headers without a
+fresh budget, and a delayed redirect body that must remain uninterrupted.
+Use `--case redirect-timeout` to reproduce the redirect timer gap against the
+preceding queue-budget library.
 Results include timings, negotiated wire protocols, connection IDs, payload
 hashes and stderr. Both client connection IDs and server-side TCP connection
 IDs are checked, including that the younger request reached the stalled
