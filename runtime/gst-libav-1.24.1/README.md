@@ -5,6 +5,16 @@ width/height assertion recorded in several Lightview endurance crashes. It
 does not establish the originating website condition, resolve the separate
 UI queue accumulation or document-loading faults, or constitute a release.
 
+Qualification update, 2026-11-19: the V3 decoder, paired with the
+preload-corrected WebKit engine and redirect-aware libsoup correction, passed
+the strict Normal-mode 24-hour gate: 86,402.473 seconds, 11,957 healthy
+navigations, zero resets/timeouts/recycles and no sustained material resource
+growth. Startup checks verified actual decoding and the loaded plugin.
+See [the final investigation result](../../docs/stability-investigation.md#first-passing-strict-24-hour-attempt--november-19-2026).
+Earlier standalone regression results below remain distinct from this later
+paired-runtime qualification, and the originating website condition remains
+unproven.
+
 The decoder can retain an output buffer whose video metadata differs from
 the newly negotiated picture. The previous assertion aborted the WebProcess.
 The patch retains that buffer while using the decoder's existing allocation

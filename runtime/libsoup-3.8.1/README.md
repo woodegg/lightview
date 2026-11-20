@@ -1,9 +1,18 @@
 # Experimental libsoup comparison
 
 This is an additional network-runtime candidate for LTV-017, alongside the
-[WebKitGTK source patches](../webkitgtk-2.52.6/README.md). It is not part of a
-formal release or installed over the distribution library. Building Lightview
-alone does not select this runtime.
+[WebKitGTK source patches](../webkitgtk-2.52.6/README.md). The qualified library
+ships in the 0.1.12 binary bundle and is not installed over the distribution
+library. Building Lightview alone does not select this runtime.
+
+Qualification update, 2026-11-19: the redirect-aware budget library, paired
+with the preload-corrected WebKit engine and V3 decoder, passed the strict
+Normal-mode 24-hour gate: 86,402.473 seconds and 11,957 healthy navigations,
+with zero resets/timeouts/recycles and no sustained material resource growth.
+See [the final investigation result](../../docs/stability-investigation.md#first-passing-strict-24-hour-attempt--november-19-2026).
+The earlier diagnostic comparisons and then-outstanding gates described below
+are retained as history. The qualified library and corresponding sources are
+published with 0.1.12; see [the release instructions](../../docs/releasing.md).
 
 The head-only Microsoft document in the second source-engine run stayed
 unready for the full 60-second verification budget, despite no load stop or
