@@ -1598,3 +1598,494 @@ decode/plugin mapping, MSE and WebGL 1/2 startup checks passed. All eight
 browser/test/monitor units were live and its first complete seventeen-site
 rotation was healthy. No endurance or leak-free pass is claimed; the fresh
 attempt must satisfy the full duration and resource gates independently.
+
+
+Fresh attempt `20261118-063038` reached its one-hour checkpoint with 452/452
+healthy navigations and 26 complete seventeen-site rounds. All eight runtime
+and monitor units were live, all four pinned runtime hashes matched, and
+the installed restart-policy hash still matched the manifest. Main PID,
+control socket and observed network PID remained unchanged. All 61
+whole-cgroup samples were complete without missing workers or sampling
+errors; OOM events, resets, rebuilds, automation timeouts and maintenance
+recycles remained zero. Twenty-nine twelve-second load-observation windows
+expired, each followed by successful document verification.
+
+Comparable post-warmup resource coverage was only 0.838 hours, below the
+unchanged four-hour minimum. Baseline PSS delta was +5.34 MiB, median PSS
+delta +13.17 MiB, descriptors changed by -4 and threads by -3. These early
+observations do not establish a leak-free result. The same instance
+continues toward the original full 24-hour acceptance.
+
+The same fresh attempt reached two hours with 975/975 healthy navigations
+and 57 complete seventeen-site rounds. All eight runtime/monitor units were
+live, all four pinned runtime hashes and the restart-policy hash matched,
+and main PID, control socket and observed network PID remained unchanged.
+All 121 whole-cgroup samples were complete without sampling errors or missing
+workers. OOM events, resets, rebuilds, automation timeouts and maintenance
+recycles remained zero. Fifty-five twelve-second load-observation windows
+expired, each followed by successful document verification.
+
+Comparable post-warmup coverage reached 1.789 hours, still below the unchanged
+four-hour resource minimum. Baseline PSS delta was +75.922 MiB with a
++45.004 MiB/hour robust slope; median PSS delta was +12.91 MiB with a
++3.754 MiB/hour slope. Descriptors changed by +1 and threads by +2. The
+positive baseline trend remains unresolved. The same instance continues;
+no full-duration or leak-free acceptance is claimed.
+
+The three-hour checkpoint recorded 1,485/1,485 healthy navigations and 87
+complete seventeen-site rounds. All eight runtime/monitor units were live,
+all four pinned runtime hashes and the restart-policy hash matched, and
+main PID, control socket and observed network PID remained unchanged. All
+181 whole-cgroup samples were complete without missing workers or sampling
+errors. OOM events, resets, rebuilds, automation timeouts and maintenance
+recycles remained zero. Seventy-eight twelve-second load-observation windows
+expired, each followed by successful document verification.
+
+Comparable post-warmup resource coverage was 2.68 hours, below the unchanged
+four-hour minimum. Baseline PSS delta was +80.87 MiB with a +29.994 MiB/hour
+robust slope; median PSS delta was +45.15 MiB with a +23.364 MiB/hour slope.
+Descriptors changed by +1 and threads by +2. Positive resource trends remain
+unresolved; these intermediate observations do not prove leak-free endurance.
+The same instance continues toward the full 24-hour acceptance.
+
+The four-hour checkpoint recorded 2,050/2,050 healthy navigations and 120
+complete seventeen-site rounds. All eight runtime/monitor units were live,
+all four pinned runtime hashes and the restart-policy hash matched, and
+main PID, control socket and observed network PID remained unchanged. All
+241 whole-cgroup samples were complete without missing workers or sampling
+errors. OOM events, resets, rebuilds, automation timeouts and maintenance
+recycles remained zero. Ninety-two twelve-second load-observation windows
+expired, each followed by successful document verification.
+
+Comparable post-warmup resource coverage was 3.513 hours after the automatic
+warmup-window step, still below the unchanged four-hour resource minimum.
+Baseline PSS delta was +57.372 MiB with a +19.996 MiB/hour robust slope;
+median PSS delta was +27.46 MiB with a +23.643 MiB/hour slope. Descriptors
+changed by +3 and threads by +1. Positive resource trends remain unresolved;
+these intermediate observations do not prove leak-free endurance. The same
+instance continues toward the original full 24-hour acceptance.
+
+The first evaluable resource window for this fresh attempt was captured at
+16:02:23 UTC on November 18: 2,312/2,312 healthy navigations, 136 complete
+seventeen-site rounds and 4.0 comparable post-warmup hours. The unchanged
+resource gate did not flag sustained material growth. Baseline PSS delta
+was +45.914 MiB with a +11.714 MiB/hour robust slope; median PSS delta was
++19.975 MiB with a +9.047 MiB/hour slope. Descriptors changed by +1 and
+threads by +0.5. Main PID and control socket remained unchanged, and resets,
+rebuilds, automation timeouts and maintenance recycles remained zero.
+
+This is an intermediate resource observation, not proof that all leaks are
+absent or that full-duration acceptance has passed. Positive PSS slopes
+remain under observation. The same instance continues toward the original
+full 24-hour acceptance; first-evaluable-resource-window.json preserves the
+checkpoint in the attempt's evidence directory.
+
+The five-hour checkpoint for the same attempt recorded 2,546/2,546 healthy
+navigations and 149 complete seventeen-site rounds. All eight runtime and
+monitor units were live, all four pinned runtime hashes and the installed
+restart-policy hash matched, and main PID, control socket and observed
+network PID remained unchanged. All 301 whole-cgroup samples were complete
+without sampling errors or missing workers. OOM events, resets, rebuilds,
+automation timeouts and maintenance recycles remained zero. The 119 expired
+twelve-second load-observation windows were followed by successful document
+verification.
+
+Comparable post-warmup resource coverage reached 4.429 hours. The unchanged
+resource gate did not flag sustained material growth: baseline PSS delta
+was -16.472 MiB with a +5.207 MiB/hour robust slope; median PSS delta was
+-6.72 MiB with a +3.924 MiB/hour slope. Descriptors changed by +1 and threads
+by zero. This intermediate checkpoint does not establish leak-free or
+full-duration acceptance. The same instance continues toward 24 hours;
+hour-05-checkpoint.json preserves the detailed evidence.
+
+The six-hour checkpoint for attempt `20261118-063038` recorded 3,022/3,022
+healthy navigations and 177 complete seventeen-site rounds. All eight
+runtime/monitor units were live, all four pinned runtime hashes and the
+installed restart-policy hash matched, and main PID, control socket and
+observed network PID remained unchanged. All 361 whole-cgroup samples were
+complete without sampling errors or missing workers. OOM events, resets,
+rebuilds, automation timeouts and maintenance recycles remained zero. The
+162 expired twelve-second load-observation windows were followed by
+successful document verification.
+
+Comparable post-warmup resource coverage reached 5.296 hours. The unchanged
+resource gate did not flag sustained material growth: baseline PSS delta
+was -63.475 MiB with a -8.266 MiB/hour robust slope; median PSS delta was
++18.445 MiB with a -0.564 MiB/hour slope. Descriptors changed by -1 and
+threads by -2. These intermediate observations do not establish leak-free
+or full-duration acceptance. The same instance continues toward 24 hours;
+hour-06-checkpoint.json preserves the detailed evidence.
+
+The seven-hour checkpoint for attempt `20261118-063038` recorded 3,471/3,471
+healthy navigations and 204 complete seventeen-site rounds. All eight
+runtime/monitor units were live, all four pinned runtime hashes and the
+installed restart-policy hash matched, and main PID, control socket and
+observed network PID remained unchanged. All 420 whole-cgroup samples were
+complete without sampling errors or missing workers. OOM events, resets,
+rebuilds, automation timeouts and maintenance recycles remained zero. The
+205 expired twelve-second load-observation windows were followed by
+successful document verification.
+
+Comparable post-warmup resource coverage reached 6.205 hours. The unchanged
+resource gate did not flag sustained material growth: baseline PSS delta
+was -76.953 MiB with a -14.634 MiB/hour robust slope; median PSS delta was
+-2.505 MiB with a -2.593 MiB/hour slope. Descriptors changed by -1.5 and
+threads by -1. These intermediate observations do not establish leak-free
+or full-duration acceptance. The same instance continues toward 24 hours;
+hour-07-checkpoint.json preserves the detailed evidence.
+
+
+The eight-hour checkpoint for attempt `20261118-063038` recorded 3,987/3,987
+healthy navigations and 234 complete seventeen-site rounds. All eight
+runtime/monitor units were live, all four pinned runtime hashes and the
+installed restart-policy hash matched, and main PID, control socket and
+observed network PID remained unchanged. All 481 whole-cgroup samples were
+complete without sampling errors or missing workers. OOM events, resets,
+rebuilds, automation timeouts and maintenance recycles remained zero. The
+230 expired twelve-second load-observation windows were followed by
+successful document verification.
+
+Comparable post-warmup resource coverage reached 7.103 hours. The unchanged
+resource gate did not flag sustained material growth: baseline PSS delta
+was -91.676 MiB with a -16.71 MiB/hour robust slope; median PSS delta was
+-8.325 MiB with a -5.425 MiB/hour slope. Descriptors changed by -2.5 and
+threads by -1. These intermediate observations do not establish leak-free
+or full-duration acceptance. The same instance continues toward 24 hours;
+hour-08-checkpoint.json preserves the detailed evidence.
+
+
+The nine-hour checkpoint for attempt `20261118-063038` recorded 4,521/4,521
+healthy navigations and 265 complete seventeen-site rounds. All eight
+runtime/monitor units were live, all four pinned runtime hashes and the
+installed restart-policy hash matched, and main PID, control socket and
+observed network PID remained unchanged. All 541 whole-cgroup samples were
+complete without sampling errors or missing workers. OOM events, resets,
+rebuilds, automation timeouts and maintenance recycles remained zero. The
+244 expired twelve-second load-observation windows were followed by
+successful document verification.
+
+Comparable post-warmup resource coverage reached 7.975 hours. The unchanged
+resource gate did not flag sustained material growth: baseline PSS delta
+was -98.172 MiB with a -15.43 MiB/hour robust slope; median PSS delta was
+-8.4 MiB with a -2.929 MiB/hour slope. Descriptors changed by -2 and
+threads by zero. These intermediate observations do not establish leak-free
+or full-duration acceptance. The same instance continues toward 24 hours;
+hour-09-checkpoint.json preserves the detailed evidence.
+
+
+The ten-hour checkpoint for attempt `20261118-063038` recorded 5,025/5,025
+healthy navigations and 295 complete seventeen-site rounds. All eight
+runtime/monitor units were live, all four pinned runtime hashes and the
+installed restart-policy hash matched, and main PID, control socket and
+observed network PID remained unchanged. All 601 whole-cgroup samples were
+complete without sampling errors or missing workers. OOM events, resets,
+rebuilds, automation timeouts and maintenance recycles remained zero. The
+276 expired twelve-second load-observation windows were followed by
+successful document verification.
+
+Comparable post-warmup resource coverage reached 8.87 hours. The unchanged
+resource gate did not flag sustained material growth: baseline PSS delta
+was -114.611 MiB with a -15.5 MiB/hour robust slope; median PSS delta was
+-30.605 MiB with a -4.315 MiB/hour slope. Descriptors and threads changed
+by zero. These intermediate observations do not establish leak-free or
+full-duration acceptance. The same instance continues toward 24 hours;
+hour-10-checkpoint.json preserves the detailed evidence.
+
+
+The eleven-hour checkpoint for attempt `20261118-063038` recorded 5,540/5,540
+healthy navigations and 325 complete seventeen-site rounds. All eight
+runtime/monitor units were live, all four pinned runtime hashes and the
+installed restart-policy hash matched, and main PID, control socket and
+observed network PID remained unchanged. All 661 whole-cgroup samples were
+complete without sampling errors or missing workers. OOM events, resets,
+rebuilds, automation timeouts and maintenance recycles remained zero. The
+293 expired twelve-second load-observation windows were followed by
+successful document verification.
+
+Comparable post-warmup resource coverage reached 9.777 hours. The unchanged
+resource gate did not flag sustained material growth: baseline PSS delta
+was -120.936 MiB with a -14.507 MiB/hour robust slope; median PSS delta was
+-0.67 MiB with a -2.37 MiB/hour slope. Descriptors changed by +4 and threads
+by zero. These intermediate observations do not establish leak-free or
+full-duration acceptance. The same instance continues toward 24 hours;
+hour-11-checkpoint.json preserves the detailed evidence.
+
+
+The twelve-hour checkpoint for attempt `20261118-063038` recorded 6,068/6,068
+healthy navigations and 356 complete seventeen-site rounds. All eight
+runtime/monitor units were live, all four pinned runtime hashes and the
+installed restart-policy hash matched, and main PID, control socket and
+observed network PID remained unchanged. All 721 whole-cgroup samples were
+complete without sampling errors or missing workers. OOM events, resets,
+rebuilds, automation timeouts and maintenance recycles remained zero. The
+310 expired twelve-second load-observation windows were followed by
+successful document verification.
+
+Comparable post-warmup resource coverage reached 10.669 hours. The unchanged
+resource gate did not flag sustained material growth: baseline PSS delta
+was -128.998 MiB with a -13.097 MiB/hour robust slope; median PSS delta was
+-33.26 MiB with a -2.329 MiB/hour slope. Descriptors changed by +4 and threads
+by zero. These intermediate observations do not establish leak-free or
+full-duration acceptance. The same instance continues toward 24 hours;
+hour-12-checkpoint.json preserves the detailed evidence.
+
+
+The thirteen-hour checkpoint for attempt `20261118-063038` recorded 6,561/6,561
+healthy navigations and 385 complete seventeen-site rounds. All eight
+runtime/monitor units were live, all four pinned runtime hashes and the
+installed restart-policy hash matched, and main PID, control socket and
+observed network PID remained unchanged. All 781 whole-cgroup samples were
+complete without sampling errors or missing workers. OOM events, resets,
+rebuilds, automation timeouts and maintenance recycles remained zero. The
+328 expired twelve-second load-observation windows were followed by
+successful document verification.
+
+Comparable post-warmup resource coverage reached 11.568 hours. The unchanged
+resource gate did not flag sustained material growth: baseline PSS delta
+was -133.545 MiB with a -11.998 MiB/hour robust slope; median PSS delta was
+-30.725 MiB with a -2.258 MiB/hour slope. Descriptors changed by +6 and threads
+by zero. These intermediate observations do not establish leak-free or
+full-duration acceptance. The same instance continues toward 24 hours;
+hour-13-checkpoint.json preserves the detailed evidence.
+
+
+The fourteen-hour checkpoint for attempt `20261118-063038` recorded 7,054/7,054
+healthy navigations and 414 complete seventeen-site rounds. All eight
+runtime/monitor units were live, all four pinned runtime hashes and the
+installed restart-policy hash matched, and main PID, control socket and
+observed network PID remained unchanged. All 840 whole-cgroup samples were
+complete without sampling errors or missing workers. OOM events, resets,
+rebuilds, automation timeouts and maintenance recycles remained zero. The
+354 expired twelve-second load-observation windows were followed by
+successful document verification.
+
+Comparable post-warmup resource coverage reached 12.481 hours. The unchanged
+resource gate did not flag sustained material growth: baseline PSS delta
+was -131.324 MiB with a -11.063 MiB/hour robust slope; median PSS delta was
+-48.25 MiB with a -3.398 MiB/hour slope. Descriptors changed by +4 and threads
+by -1. These intermediate observations do not establish leak-free or
+full-duration acceptance. The same instance continues toward 24 hours;
+hour-14-checkpoint.json preserves the detailed evidence.
+
+
+The fifteen-hour checkpoint for attempt `20261118-063038` recorded 7,461/7,461
+healthy navigations and 438 complete seventeen-site rounds. All eight
+runtime/monitor units were live, all four pinned runtime hashes and the
+installed restart-policy hash matched, and main PID, control socket and
+observed network PID remained unchanged. All 900 whole-cgroup samples were
+complete without sampling errors or missing workers. OOM events, resets,
+rebuilds, automation timeouts and maintenance recycles remained zero. The
+411 expired twelve-second load-observation windows were followed by
+successful document verification.
+
+Comparable post-warmup resource coverage reached 13.412 hours. The unchanged
+resource gate did not flag sustained material growth: baseline PSS delta
+was -136.2 MiB with a -11.037 MiB/hour robust slope; median PSS delta was
+-51.935 MiB with a -5.156 MiB/hour slope. Descriptors changed by +6 and threads
+by -1. These intermediate observations do not establish leak-free or
+full-duration acceptance. The same instance continues toward 24 hours;
+hour-15-checkpoint.json preserves the detailed evidence.
+
+
+The sixteen-hour checkpoint for attempt `20261118-063038` recorded 7,932/7,932
+healthy navigations and 466 complete seventeen-site rounds. All eight
+runtime/monitor units were live, all four pinned runtime hashes and the
+installed restart-policy hash matched, and main PID, control socket and
+observed network PID remained unchanged. All 960 whole-cgroup samples were
+complete without sampling errors or missing workers. OOM events, resets,
+rebuilds, automation timeouts and maintenance recycles remained zero. The
+437 expired twelve-second load-observation windows were followed by
+successful document verification.
+
+Comparable post-warmup resource coverage reached 14.325 hours. The unchanged
+resource gate did not flag sustained material growth: baseline PSS delta
+was -132.788 MiB with a -9.937 MiB/hour robust slope; median PSS delta was
+-54.76 MiB with a -5.522 MiB/hour slope. Descriptors changed by +5 and threads
+by -2. These intermediate observations do not establish leak-free or
+full-duration acceptance. The same instance continues toward 24 hours;
+hour-16-checkpoint.json preserves the detailed evidence.
+
+
+The seventeen-hour checkpoint for attempt `20261118-063038` recorded 8,380/8,380
+healthy navigations and 492 complete seventeen-site rounds. All eight
+runtime/monitor units were live, all four pinned runtime hashes and the
+installed restart-policy hash matched, and main PID, control socket and
+observed network PID remained unchanged. All 1,020 whole-cgroup samples were
+complete without sampling errors or missing workers. OOM events, resets,
+rebuilds, automation timeouts and maintenance recycles remained zero. The
+473 expired twelve-second load-observation windows were followed by
+successful document verification.
+
+Comparable post-warmup resource coverage reached 15.177 hours. The unchanged
+resource gate did not flag sustained material growth: baseline PSS delta
+was -129.654 MiB with a -9.006 MiB/hour robust slope; median PSS delta was
+-66.665 MiB with a -5.552 MiB/hour slope. Descriptors changed by +4 and threads
+by -2. These intermediate observations do not establish leak-free or
+full-duration acceptance. The same instance continues toward 24 hours;
+hour-17-checkpoint.json preserves the detailed evidence.
+
+
+The eighteen-hour checkpoint for attempt `20261118-063038` recorded 8,864/8,864
+healthy navigations and 521 complete seventeen-site rounds. All eight
+runtime/monitor units were live, all four pinned runtime hashes and the
+installed restart-policy hash matched, and main PID, control socket and
+observed network PID remained unchanged. All 1,080 whole-cgroup samples were
+complete without sampling errors or missing workers. OOM events, resets,
+rebuilds, automation timeouts and maintenance recycles remained zero. The
+495 expired twelve-second load-observation windows were followed by
+successful document verification.
+
+Comparable post-warmup resource coverage reached 16.136 hours. The unchanged
+resource gate did not flag sustained material growth: baseline PSS delta
+was -126.972 MiB with a -7.739 MiB/hour robust slope; median PSS delta was
+-64.61 MiB with a -4.924 MiB/hour slope. Descriptors changed by +4 and threads
+by -2. These intermediate observations do not establish leak-free or
+full-duration acceptance. The same instance continues toward 24 hours;
+hour-18-checkpoint.json preserves the detailed evidence.
+
+
+The nineteen-hour checkpoint for attempt `20261118-063038` recorded 9,380/9,380
+healthy navigations and 551 complete seventeen-site rounds. All eight
+runtime/monitor units were live, all four pinned runtime hashes and the
+installed restart-policy hash matched, and main PID, control socket and
+observed network PID remained unchanged. All 1,140 whole-cgroup samples were
+complete without sampling errors or missing workers. OOM events, resets,
+rebuilds, automation timeouts and maintenance recycles remained zero. The
+513 expired twelve-second load-observation windows were followed by
+successful document verification.
+
+Comparable post-warmup resource coverage reached 17.015 hours. The unchanged
+resource gate did not flag sustained material growth: baseline PSS delta
+was -108.323 MiB with a -6.457 MiB/hour robust slope; median PSS delta was
+-52.91 MiB with a -3.686 MiB/hour slope. Descriptors changed by +3 and threads
+by -2. These intermediate observations do not establish leak-free or
+full-duration acceptance. The same instance continues toward 24 hours;
+hour-19-checkpoint.json preserves the detailed evidence.
+
+
+The twenty-hour checkpoint for attempt `20261118-063038` recorded 9,921/9,921
+healthy navigations and 583 complete seventeen-site rounds. All eight
+runtime/monitor units were live, all four pinned runtime hashes and the
+installed restart-policy hash matched, and main PID, control socket and
+observed network PID remained unchanged. All 1,202 whole-cgroup samples were
+complete without sampling errors or missing workers. OOM events, resets,
+rebuilds, automation timeouts and maintenance recycles remained zero. The
+530 expired twelve-second load-observation windows were followed by
+successful document verification.
+
+Comparable post-warmup resource coverage reached 17.956 hours. The unchanged
+resource gate did not flag sustained material growth: baseline PSS delta
+was -83.094 MiB with a -4.922 MiB/hour robust slope; median PSS delta was
+-31.57 MiB with a -2.609 MiB/hour slope. Descriptors changed by +5 and threads
+by zero. These intermediate observations do not establish leak-free or
+full-duration acceptance. The same instance continues toward 24 hours;
+hour-20-checkpoint.json preserves the detailed evidence.
+
+
+The twenty-one-hour checkpoint for attempt `20261118-063038` recorded
+10,447/10,447 healthy navigations and 614 complete seventeen-site rounds.
+All eight runtime/monitor units were live, all four pinned runtime hashes
+and the installed restart-policy hash matched, and main PID, control socket
+and observed network PID remained unchanged. All 1,262 whole-cgroup samples
+were complete without sampling errors or missing workers. OOM events,
+resets, rebuilds, automation timeouts and maintenance recycles remained zero.
+The 548 expired twelve-second load-observation windows were followed by
+successful document verification.
+
+Comparable post-warmup resource coverage reached 18.871 hours. The unchanged
+resource gate did not flag sustained material growth: baseline PSS delta
+was -67.935 MiB with a -3.825 MiB/hour robust slope; median PSS delta was
+-20.635 MiB with a -1.594 MiB/hour slope. Descriptors changed by +4 and threads
+by +1. These intermediate observations do not establish leak-free or
+full-duration acceptance. The same instance continues toward 24 hours;
+hour-21-checkpoint.json preserves the detailed evidence.
+
+
+The twenty-two-hour checkpoint for attempt `20261118-063038` recorded
+10,957/10,957 healthy navigations and 644 complete seventeen-site rounds.
+All eight runtime/monitor units were live, all four pinned runtime hashes
+and the installed restart-policy hash matched, and main PID, control socket
+and observed network PID remained unchanged. All 1,320 whole-cgroup samples
+were complete without sampling errors or missing workers. OOM events,
+resets, rebuilds, automation timeouts and maintenance recycles remained zero.
+The 563 expired twelve-second load-observation windows were followed by
+successful document verification.
+
+Comparable post-warmup resource coverage reached 19.725 hours. The unchanged
+resource gate did not flag sustained material growth: baseline PSS delta
+was -50.23 MiB with a -3.061 MiB/hour robust slope; median PSS delta was
+-4.62 MiB with a -1.043 MiB/hour slope. Descriptors changed by +5 and threads
+by +1. These intermediate observations do not establish leak-free or
+full-duration acceptance. The same instance continues toward 24 hours;
+hour-22-checkpoint.json preserves the detailed evidence.
+
+
+The twenty-three-hour checkpoint for attempt `20261118-063038` recorded
+11,473/11,473 healthy navigations and 674 complete seventeen-site rounds.
+All eight runtime/monitor units were live, all four pinned runtime hashes
+and the installed restart-policy hash matched, and main PID, control socket
+and observed network PID remained unchanged. All 1,379 whole-cgroup samples
+were complete without sampling errors or missing workers. OOM events,
+resets, rebuilds, automation timeouts and maintenance recycles remained zero.
+The 582 expired twelve-second load-observation windows were followed by
+successful document verification.
+
+Comparable post-warmup resource coverage reached 20.608 hours. The unchanged
+resource gate did not flag sustained material growth: baseline PSS delta
+was -43.426 MiB with a -2.624 MiB/hour robust slope; median PSS delta was
++1.71 MiB with a -0.181 MiB/hour slope. Descriptors changed by +4 and threads
+by +1. These intermediate observations do not establish leak-free or
+full-duration acceptance. The same instance continues toward 24 hours;
+hour-23-checkpoint.json preserves the detailed evidence.
+
+## First passing strict 24-hour attempt — November 19, 2026
+
+Attempt `20261118-063038` completed naturally after 86,402.473 seconds on
+`DISPLAY=:1` in Normal mode. The original driver, independent completion audit,
+and final evidence review all passed the unchanged acceptance conditions.
+All 11,957 navigations were healthy, covering 703 complete seventeen-site
+rounds and six additional navigations. Main PID 1972936, NetworkProcess PID
+1972940, control-socket inode, and WebProcess generation remained unchanged.
+There were zero resets, view rebuilds, automation timeouts, navigation retries,
+load errors, blank/unverified documents, destination mismatches, or maintenance
+recycles. The 606 expired twelve-second resource-observation windows were
+followed by successful document verification within its separate budget.
+
+All 1,440 whole-cgroup samples covering the run were complete, including
+reparented workers. The first sample followed driver start by 1.539 seconds;
+the maximum interval was 60.735 seconds, and a final sample covered completion.
+Cgroup OOM/kill/limit-event counters remained zero. Independent observation
+recorded only the original UI PID and a ready engine, with zero recovery
+counters. Observer, process sampler, cgroup sampler and native-capture error
+logs were empty. The browser service journal contained only the existing
+nonfatal missing PipeWire `client-rt.conf` warning, with no service restart or
+recorded crash. Startup qualification had verified actual media decoding,
+plugin mappings, MSE, WebGL and WebGL2 with the sandbox enabled. Neither
+tracing nor a debugger was used during the healthy run.
+
+Comparable post-warmup resource coverage reached 21.528 hours. Baseline PSS
+changed from 838.697 to 795.731 MiB (-42.966 MiB; robust slope -2.16 MiB/hour).
+Median PSS changed from 1,266.84 to 1,282.33 MiB (+15.49 MiB; +0.428 MiB/hour).
+Median descriptors changed by +3 (+0.239/hour) and threads by +1 (zero slope).
+The unchanged resource gate found no sustained material growth. Navigation
+PSS peaked at 2,859.38 MiB. This is a passing finite-duration endurance result,
+not proof that every possible workload is free of memory leaks.
+
+The final review verified all 52 source-snapshot hashes and 32 matching
+repository implementation/build/test files. Application, WebKit, libsoup,
+decoder and test-host restart-policy hashes matched the launch manifest.
+The qualified combination is the preload-corrected WebKit engine, redirect-aware
+libsoup budget correction, and V3 decoder described above. The preceding failed
+attempts remain failures; their durations are not combined with this result.
+
+The run directory preserves `results.csv`, `driver.log`,
+`completion-audit.json`, `completion-review.json`, `service-journal-final.txt`,
+observer/process/cgroup samples and the launch manifest. This qualifies the
+tested Normal-mode development runtime; it does not publish 0.1.12, install
+these libraries over the distribution runtime, or constitute a separate
+Low Memory-mode 24-hour qualification.
+
+After preserving the passing evidence, the completed test monitors were
+retired. `monitor-retirement.json` records their inactive state and confirms
+that the browser and original control socket were left running. The final
+documentation update changes no application, patch, test or build code.

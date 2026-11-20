@@ -10,7 +10,7 @@ CFLAGS += -std=c11 -Wall -Wextra -Wpedantic -Wformat=2 \
 LDLIBS += $(shell $(PKG_CONFIG) --libs $(PKGS))
 
 .PHONY: all check-deps check install install-sandbox-launcher clean
-all: build/lightview build/lightview-sandbox-launcher
+all: build/lightview build/lightview-sandbox-launcher build/lightview-runtime-launcher
 
 check-deps:
 	@$(PKG_CONFIG) --atleast-version=2.40 webkit2gtk-4.1 || { echo 'Install WebKitGTK 4.1 development files (engine >= 2.40).'; exit 1; }
@@ -28,6 +28,10 @@ build/lightview-resources.c: data/lightview.gresource.xml data/lightview.png
 	glib-compile-resources --sourcedir=data --generate-source --target=$@ $<
 
 build/lightview-sandbox-launcher: src/lightview-sandbox-launcher.c
+	mkdir -p build
+	$(CC) $(CFLAGS) -o $@ $<
+
+build/lightview-runtime-launcher: src/lightview-runtime-launcher.c
 	mkdir -p build
 	$(CC) $(CFLAGS) -o $@ $<
 
@@ -58,4 +62,4 @@ install-sandbox-launcher: install
 
 clean:
 	$(RM) build/lightview build/lightview-sandbox-launcher \
-		build/lightview-resources.c build/lightview-resources.o
+		build/lightview-runtime-launcher build/lightview-resources.c build/lightview-resources.o

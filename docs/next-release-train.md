@@ -4,10 +4,11 @@ This document records accepted requirements for the next Lightview release.
 Items remain requirements until implementation, validation, and release work
 are completed.
 
-Next train: 0.1.12 development, including LTV-017. Its full endurance
-acceptance remains unmet; merging development work does not qualify a release.
-The last formal release is 0.1.11, published on 2026-10-02 with LTV-016 and
-the requirements released in 0.1.8 through 0.1.10.
+Current formal release: 0.1.12, published on 2026-11-20 with LTV-017 and the
+qualified private runtime bundle. Its strict Normal-mode 24-hour endurance
+gate passed on 2026-11-19. Package installation and integration verification
+are recorded in the release evidence. Earlier requirements shipped in 0.1.8
+through 0.1.11. No next-train requirements have been locked yet.
 
 ## LTV-008 — Version information button
 
@@ -354,14 +355,15 @@ Acceptance:
 
 ## LTV-017 — Long-running navigation recovery
 
-Status: in development.
+Status: released in 0.1.12 with the qualified WebKit/libsoup/V3 decoder bundle;
+strict Normal-mode 24-hour endurance passed on 2026-11-19.
 
 The current engine candidate includes reviewable
 [WebKitGTK source patches](../runtime/webkitgtk-2.52.6/README.md) for a detached
 keepalive connection leak, a Linux `ETOOMANYREFS` send-queue stall, and segmented
-media-loop seeking. Targeted regressions pass; the full 24-hour gate below is
-still required. Building Lightview alone does not patch the distribution
-WebKit runtime. Evidence and failed-run distinctions are maintained in
+media-loop seeking. Targeted regressions and the full 24-hour gate below pass
+for the qualified paired runtime. Building Lightview alone does not patch the
+distribution WebKit runtime. Evidence and failed-run distinctions are maintained in
 [the investigation](stability-investigation.md).
 
 The next runtime iteration also includes a
@@ -380,8 +382,8 @@ The November 17 candidate additionally clears shared synchronous-message
 scheduling entries and queued messages when an IPC connection is invalidated.
 A deterministic native regression reproduces retention before the fix and
 checks connection release and companion-message delivery after it. This targets
-the observed UI queue accumulation; endurance qualification and Microsoft
-document-stall investigation remain outstanding.
+the observed UI queue accumulation. The subsequent document-stall investigation
+and runtime iterations are recorded below.
 Its first strict attempt ended after 6 h 45 min on an unverified Microsoft
 document and also failed the PSS growth gate. Main-process thread/descriptor
 medians stayed flat, but that does not qualify the full browser. Optional
@@ -424,12 +426,27 @@ Three redirect cases, the compatibility matrix, eleven public transport cases,
 120 upstream subtests, 25 verifier and 45 integration tests passed. The paired
 preload regression passed again with verified failing predecessor controls.
 The earlier live comparison was preserved as administratively retired and
-incomplete after 579 healthy navigations; a fresh seventeen-site comparison is
-now running. These are not formal 24-hour attempts. The full gate remains unmet.
+incomplete after 579 healthy navigations; the follow-up comparison was diagnostic,
+not formal 24-hour evidence.
 The V3 candidate completed a full 24-hour navigation run on November 10--11,
 but failed acceptance because descriptor and thread counts grew materially.
 The recorded evidence and distinction from a passing run are documented in
 the investigation.
+
+The later strict attempt `20261117-211752` was interrupted after 9 h 4 min by
+an unattended-upgrade `needrestart` service restart. A narrowly scoped test-host
+restart override and post-upgrade qualification (25 verifier and 45 integration
+checks) preceded a fresh attempt. Attempt `20261118-063038` then passed after
+86,402.473 seconds: 11,957 healthy navigations, 703 complete seventeen-site
+rounds, unchanged UI/network PIDs and socket, zero resets/rebuilds/timeouts or
+maintenance recycles, and 21.528 hours of comparable post-warmup resource
+evidence without sustained material growth. All 1,440 whole-cgroup samples
+were complete and OOM counters were zero. Original driver, independent audit,
+and final review agree. This qualifies the tested Normal-mode development
+runtime; it does not establish a separate Low Memory-mode 24-hour pass. The
+paired runtime is included in the 0.1.12 release; source-only installation still
+uses distribution libraries. See the investigation's November 19 result and
+[the release procedure](releasing.md).
 
 Keep an automation instance usable during repeated heavy cross-site navigation
 without allowing retained WebKit allocations to reach the last-resort kill

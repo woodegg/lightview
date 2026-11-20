@@ -12,6 +12,18 @@ codecs, and the website. Broad compatibility with major websites has not yet
 been established; DRM streaming, browser extensions, popup-based sign-in flows,
 and services that require another browser may not work.
 
+## Official release
+
+The [0.1.12 release](https://github.com/woodegg/lightview/releases/tag/v0.1.12)
+provides an Ubuntu 24.04 x86_64 package with the qualified private WebKitGTK,
+JavaScriptCore, libsoup and video-decoder libraries, plus corresponding sources
+and checksums. See [installation and release instructions](docs/releasing.md).
+The installed runtime completed a strict Normal-mode 24-hour major-site test
+with 11,957 healthy navigations and zero resets, automation timeouts or OOM
+events. This is coverage of the recorded workload, not every website or DRM
+service. Low Memory mode has functional regression coverage, not a separate
+24-hour qualification.
+
 ## Build and run
 
 On Ubuntu 24.04 or a Debian-family distribution with WebKitGTK >= 2.40:
@@ -155,14 +167,15 @@ The ongoing endurance investigation includes an
 [experimental source-built WebKitGTK candidate](runtime/webkitgtk-2.52.6/README.md)
 for retained network connections, stalled Linux IPC sends, and media looping.
 Those patches are separate from the Lightview executable and are not applied
-by `make install`. Their regression results do not yet establish 24-hour
-stability; see [the investigation](docs/stability-investigation.md).
+by `make install`. The official 0.1.12 binary package includes the exact paired
+runtime that passed the 24-hour test; see
+[the investigation](docs/stability-investigation.md).
 
 An additional [gst-libav correction](runtime/gst-libav-1.24.1/README.md)
 reallocates decoded frames when retained buffer metadata disagrees with the
 negotiated picture, addressing a fatal decoder invariant seen in long tests.
-It is a separate development runtime candidate with an aborting control and
-frame-content regression, pending the same endurance qualification.
+It has an aborting control and frame-content regression and is included in the
+qualified 0.1.12 runtime bundle. A source-only `make install` does not select it.
 
 WebKit uses multiple processes for rendering and networking; one view does not
 mean one OS process. JavaScript heaps, video, GPU buffers, and the content itself

@@ -2,8 +2,16 @@
 
 ## Unreleased
 
+## 0.1.12 — 2026-11-20
+
 ### Added
 
+- Ship a native launcher selecting the qualified private runtime, a checksum-
+  verified installer, corresponding runtime sources and third-party notices.
+  The installer leaves existing matching runtime files untouched during
+  reinstallation so running browsers keep their mapped libraries. The native
+  launcher preserves the GTK application name and works through the optional
+  nested-container sandbox helper after its privilege drop.
 - Add an experimental libsoup HTTP/2 response-header guard with one bounded
   bodyless GET/HEAD retry and immediate cancellation wakeup. It coalesces
   eligible waiters once a connection is retired and preserves
@@ -13,26 +21,32 @@
   retain HTTP/2.
   Restore pending asynchronous HTTP/1.1 reads across pause/resume and preserve
   cancellation while paused. Portable transport and native pause regressions
-  accompany the patch; full endurance is pending.
+  accompany the patch. The paired development runtime passed the strict
+  Normal-mode 24-hour endurance gate on 2026-11-19 with 11,957 healthy
+  navigations, zero resets/timeouts/recycles and no sustained material resource
+  growth; see the stability investigation for scope and evidence.
 - Preserve matching document-local WebKit preloads when the shared memory cache
   is disabled, avoiding duplicate parser requests after transport timeouts.
-  The experimental runtime passed local regressions; live endurance is pending.
+  The paired runtime passed local regressions and the November 19 endurance run.
 - Add optional origin-only subresource lifecycle tracing for document-loading
   investigations, independent of the page's bounded Resource Timing buffer.
 - Add an experimental WebKit IPC invalidation cleanup for closed connections
   retained in shared synchronous-message scheduling state, with a deterministic
   native lifetime regression and companion-message/reentrant-dispatch coverage.
-  This runtime correction still requires the full endurance acceptance gate.
+  This correction is included in the qualified November 19 runtime combination.
 - Add an isolated gst-libav 1.24.1 correction for the decoded-frame metadata
   assertion seen in endurance crashes, with a deterministic aborting control
   and pixel-verified resolution-change regression. The candidate reallocates
   mismatched frames and normalizes fresh output metadata to the negotiated
-  picture, rejecting incompatible copy destinations; it still
-  requires independent endurance qualification.
+  picture, rejecting incompatible copy destinations. The V3 decoder is included
+  in the qualified November 19 runtime combination.
 - Preserve an experimental WebKitGTK 2.52.6 source-patch set and build notes
   for detached keepalive cleanup, Linux IPC descriptor-pressure retries, and
   ordinary media looping. This is an isolated runtime candidate, separate
-  from the distribution engine and pending the 24-hour endurance gate.
+  from the distribution engine. The qualified paired runtime passed the
+  November 19 endurance gate and is included in the 0.1.12 binary package with
+  matching corresponding sources and licenses. Distribution libraries are not
+  replaced; source-only `make install` continues to use the system runtime.
 - Document an independent libsoup 3.8.1 candidate and its regression coverage
   for investigating slow or stalled resource streams; keep it separate from
   the installed distribution network library and normal Lightview install.

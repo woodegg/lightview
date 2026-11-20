@@ -1,0 +1,116 @@
+{
+  "version": "0.1.12",
+  "platform": "Ubuntu 24.04 x86_64",
+  "application_source_difference_from_endurance": "LIGHTVIEW_VERSION changes from 0.1.12-dev to 0.1.12; browser logic unchanged",
+  "application_binary_sha256": "32b4b9e0c6d9c2403257fc79733d137960320e36883d1ed036d2a88d747aa7ed",
+  "native_runtime_launcher_sha256": "c6224d31393bcf812129c863d324be583daa6d20a06a98e3f79b1a900a857619",
+  "sandbox_launcher_sha256": "572306060b17ce48f2874754017a496dfb883180c76c0a4141401a0b3b6a5f3f",
+  "endurance": {
+    "tested_application_version": "0.1.12-dev",
+    "run_id": "20261118-063038",
+    "duration_seconds": 86402.473,
+    "healthy_navigations": 11957,
+    "sites": 17,
+    "complete_site_rounds": 703,
+    "mode": "Normal",
+    "passed": true,
+    "whole_cgroup_samples": 1440,
+    "oom_events": 0,
+    "resets": 0,
+    "view_rebuilds": 0,
+    "automation_timeouts": 0,
+    "navigation_retries": 0,
+    "network_recycles": 0,
+    "maintenance_recycles": 0,
+    "post_warmup_hours": 21.528,
+    "resource_analysis": {
+      "evaluable": true,
+      "complete_rounds": 703,
+      "post_warmup_hours": 21.528,
+      "sustained_growth_suspected": false,
+      "growth_reasons": [],
+      "metrics": {
+        "pss_baseline_mib": {
+          "early": 838.697,
+          "late": 795.731,
+          "delta": -42.966,
+          "slope_per_hour": -2.16,
+          "material_delta_threshold": 128.0,
+          "threshold_exceeded": false,
+          "suspected": false
+        },
+        "pss_median_mib": {
+          "early": 1266.84,
+          "late": 1282.33,
+          "delta": 15.49,
+          "slope_per_hour": 0.428,
+          "material_delta_threshold": 128.0,
+          "threshold_exceeded": false,
+          "suspected": false
+        },
+        "total_fds_median": {
+          "early": 193.0,
+          "late": 196.0,
+          "delta": 3.0,
+          "slope_per_hour": 0.239,
+          "material_delta_threshold": 48.0,
+          "threshold_exceeded": false,
+          "suspected": false
+        },
+        "total_threads_median": {
+          "early": 90.0,
+          "late": 91.0,
+          "delta": 1.0,
+          "slope_per_hour": 0.0,
+          "material_delta_threshold": 24.0,
+          "threshold_exceeded": false,
+          "suspected": false
+        }
+      }
+    },
+    "original_driver_and_independent_audit_agree": true
+  },
+  "release_package": {
+    "runner_checks": 25,
+    "integration_checks": 45,
+    "integration_skipped": 0,
+    "results": [
+      {
+        "suite": "runner",
+        "exit_code": 0,
+        "seconds": 0.122
+      },
+      {
+        "suite": "integration",
+        "exit_code": 0,
+        "seconds": 246.418
+      }
+    ],
+    "isolated_namespace_hides_host_runtime": true,
+    "separate_xdg_cache_and_runtime_directories": true,
+    "all_three_process_roles_mapped_packaged_file_inodes": true,
+    "caller_uid_restored": true,
+    "effective_capabilities_zero": true,
+    "no_new_privileges": true,
+    "sandbox_enabled": true,
+    "optional_setuid_helper_checks": 4,
+    "optional_setuid_helper_passed": true,
+    "live_reinstallation": {
+      "passed": true,
+      "eval_iterations_during_install": 57,
+      "same_pid": true,
+      "same_socket": true,
+      "same_generation": true,
+      "reset_count": 0,
+      "automation_timeout_count": 0
+    }
+  },
+  "runtime_elf_bytes_match_qualified_components": true,
+  "credential_scan_hits": 0,
+  "private_csvs_or_profiles_included": false,
+  "limitations": [
+    "No separate Low Memory-mode 24-hour qualification.",
+    "Finite navigation/resource testing does not prove absence of all possible leaks or universal website/DRM/conferencing compatibility."
+  ],
+  "passed": true
+}

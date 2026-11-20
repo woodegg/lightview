@@ -1,9 +1,16 @@
 # Experimental WebKitGTK runtime
 
-These source patches are the runtime candidate for LTV-017. Lightview still
+These source patches implement the private 0.1.12 runtime for LTV-017. Lightview still
 links dynamically to WebKitGTK; building or installing Lightview alone does
-not apply these fixes to the distribution's engine. This candidate is not a
-released runtime and has not yet passed the required 24-hour endurance gate.
+not apply these fixes to the distribution's engine. The official 0.1.12 binary
+bundle includes the qualified runtime. On 2026-11-19 the preload-corrected engine, paired with the
+redirect-aware libsoup budget correction and V3 decoder, passed the strict
+Normal-mode 24-hour gate: 86,402.473 seconds, 11,957 healthy navigations,
+zero resets/timeouts/recycles and no sustained material resource growth.
+See [the final investigation result](../../docs/stability-investigation.md#first-passing-strict-24-hour-attempt--november-19-2026).
+Earlier comparison outcomes below remain historical evidence, not additional
+passing endurance runs. Building Lightview alone still does not select this
+qualified runtime combination.
 
 The patches address independently reproduced problems:
 
