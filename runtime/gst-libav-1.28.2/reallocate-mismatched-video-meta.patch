@@ -1,0 +1,111 @@
+--- a/ext/libav/gstavviddec.c
++++ b/ext/libav/gstavviddec.c
+@@ -1164,6 +1164,20 @@
+   gst_buffer_replace (&dframe->buffer, frame->output_buffer);
+   gst_buffer_replace (&frame->output_buffer, NULL);
+ 
++  /* A downstream descriptor that cannot contain the requested picture must
++   * not reach gst_video_frame_map or libav. Decode into libav-owned storage;
++   * the output copy path will reject the incompatible destination cleanly. */
++  {
++    GstVideoMeta *vmeta = gst_buffer_get_video_meta (dframe->buffer);
++    GstVideoInfo *info = &ffmpegdec->pool_info;
++    if (vmeta && (vmeta->format != GST_VIDEO_INFO_FORMAT (info) ||
++            vmeta->width < (guint) GST_VIDEO_INFO_WIDTH (info) ||
++            vmeta->height < (guint) GST_VIDEO_INFO_HEIGHT (info))) {
++      gst_buffer_replace (&dframe->buffer, NULL);
++      goto no_dr;
++    }
++  }
++
+   /* Fill avpicture */
+   if (!gst_video_frame_map (&dframe->vframe, &ffmpegdec->pool_info,
+           dframe->buffer, GST_MAP_READWRITE))
+@@ -1935,6 +1949,36 @@
+   if (G_UNLIKELY (ret != GST_FLOW_OK))
+     goto alloc_failed;
+ 
++  info = &ffmpegdec->output_state->info;
++  /* This is a freshly allocated copy destination, not libav's source buffer.
++   * Keep its offsets/strides but describe only the negotiated visible picture.
++   * A pool with an incompatible or undersized layout cannot be recovered by
++   * changing dimensions, so report a decoding error instead. */
++  {
++    GstVideoMeta *vmeta = gst_buffer_get_video_meta (frame->output_buffer);
++    if (vmeta && (vmeta->format != GST_VIDEO_INFO_FORMAT (info) ||
++            vmeta->width < (guint) GST_VIDEO_INFO_WIDTH (info) ||
++            vmeta->height < (guint) GST_VIDEO_INFO_HEIGHT (info))) {
++      GST_ELEMENT_ERROR (ffmpegdec, STREAM, DECODE,
++          ("Output buffer cannot hold the decoded picture"),
++          ("Video meta %ux%u, negotiated picture %dx%d",
++              vmeta->width, vmeta->height, GST_VIDEO_INFO_WIDTH (info),
++              GST_VIDEO_INFO_HEIGHT (info)));
++      return GST_FLOW_ERROR;
++    }
++    if (vmeta && (vmeta->width != (guint) GST_VIDEO_INFO_WIDTH (info) ||
++            vmeta->height != (guint) GST_VIDEO_INFO_HEIGHT (info))) {
++      frame->output_buffer = gst_buffer_make_writable (frame->output_buffer);
++      if (!frame->output_buffer)
++        return GST_FLOW_ERROR;
++      vmeta = gst_buffer_get_video_meta (frame->output_buffer);
++      if (!vmeta)
++        return GST_FLOW_ERROR;
++      vmeta->width = GST_VIDEO_INFO_WIDTH (info);
++      vmeta->height = GST_VIDEO_INFO_HEIGHT (info);
++    }
++  }
++
+   /* original ffmpeg code does not handle odd sizes correctly.
+    * This patched up version does */
+   /* Fill avpicture */
+@@ -1988,7 +2032,7 @@
+         ("Cannot access memory for read and write operation."),
+         ("The video memory allocated from downstream pool could not mapped for"
+             " read and write."));
+-    return ret;
++    return GST_FLOW_ERROR;
+   }
+ not_negotiated:
+   {
+@@ -2128,7 +2172,6 @@
+     *ret = get_output_buffer (ffmpegdec, output_frame);
+     gst_buffer_unref (tmp);
+   }
+-#ifndef G_DISABLE_ASSERT
+   else {
+     GstVideoMeta *vmeta =
+         gst_buffer_get_video_meta (output_frame->output_buffer);
+@@ -2136,13 +2179,18 @@
+       GstVideoInfo *info = &ffmpegdec->output_state->info;
+       if (vmeta->width != GST_VIDEO_INFO_WIDTH (info) ||
+           vmeta->height != GST_VIDEO_INFO_HEIGHT (info)) {
+-        g_error ("video meta uses %dx%d instead of %dx%d",
++        GstBuffer *tmp = output_frame->output_buffer;
++
++        GST_WARNING_OBJECT (ffmpegdec,
++            "Reallocating frame: video meta is %ux%u, negotiated picture is %dx%d",
+             vmeta->width, vmeta->height, GST_VIDEO_INFO_WIDTH (info),
+             GST_VIDEO_INFO_HEIGHT (info));
++        output_frame->output_buffer = NULL;
++        *ret = get_output_buffer (ffmpegdec, output_frame);
++        gst_buffer_unref (tmp);
+       }
+     }
+   }
+-#endif
+   gst_object_unref (pool);
+ 
+   if (G_UNLIKELY (*ret != GST_FLOW_OK))
+@@ -2278,8 +2326,10 @@
+ no_output:
+   {
+     GST_DEBUG_OBJECT (ffmpegdec, "no output buffer");
+-    GST_VIDEO_CODEC_FRAME_FLAG_UNSET (input_frame,
+-        GST_FFMPEG_VIDEO_CODEC_FRAME_FLAG_ALLOCATED);
++    /* Draining supplies no input frame after an allocation/copy failure. */
++    if (input_frame)
++      GST_VIDEO_CODEC_FRAME_FLAG_UNSET (input_frame,
++          GST_FFMPEG_VIDEO_CODEC_FRAME_FLAG_ALLOCATED);
+     gst_video_decoder_drop_frame (GST_VIDEO_DECODER (ffmpegdec), output_frame);
+     goto beach;
+   }

@@ -436,6 +436,59 @@ class BrowserIntegration(unittest.TestCase):
             "https://en.wikipedia.org/wiki/WebKit", "https://www.amazon.com/"))
         self.assertFalse(ctl.navigation_target_reached("about:blank", "https://example.com/"))
 
+    def test_webaudio_output_device_probe(self):
+        for options in ((), ("--low-memory",)):
+            with self.subTest(options=options), tempfile.TemporaryDirectory() as directory:
+                with browser(directory, "--private", *options) as (path, process):
+                    self.cli(path, "open", self.url, "--wait")
+                    before = self.cli(path, "status")
+                    result = self.cli(path, "eval", """(async () => {
+                        const values = [];
+                        for (let i = 0; i < 3; i++) {
+                            const context = new AudioContext();
+                            values.push(context.destination.maxChannelCount);
+                            await context.close();
+                        }
+                        return values;
+                    })()""")
+                    self.assertEqual(len(result), 3)
+                    self.assertTrue(all(isinstance(value, int) and value >= 0
+                                        for value in result), result)
+                    after = self.cli(path, "status")
+                    self.assertEqual(after["pid"], process.pid)
+                    self.assertEqual(after["reset_count"], before["reset_count"])
+                    self.assertEqual(after["web_process_generation"],
+                                     before["web_process_generation"])
+
+    def test_xml_xslt_and_international_text(self):
+        # Exercise the XML/XSLT allocator boundary and ICU in the real process.
+        with tempfile.TemporaryDirectory(prefix="lightview-test-") as directory:
+            with browser(directory, "--private") as (path, _):
+                self.cli(path, "open", self.url, "--wait")
+                result = self.cli(path, "eval", """(() => {
+                    const parser = new DOMParser();
+                    const xml = parser.parseFromString('<root><name>世界</name></root>', 'text/xml');
+                    const sheet = parser.parseFromString(`<xsl:stylesheet version="1.0"
+                        xmlns:xsl="http://www.w3.org/1999/XSL/Transform">
+                        <xsl:output method="xml"/><xsl:template match="/">
+                        <result><xsl:value-of select="root/name"/></result>
+                        </xsl:template></xsl:stylesheet>`, 'text/xml');
+                    const processor = new XSLTProcessor();
+                    processor.importStylesheet(sheet);
+                    const output = processor.transformToDocument(xml);
+                    return {text: output.documentElement.textContent,
+                        xml: new XMLSerializer().serializeToString(output),
+                        normalized: 'e\\u0301'.normalize('NFC'),
+                        upper: 'istanbul'.toLocaleUpperCase('tr-TR'),
+                        date: new Intl.DateTimeFormat('en-US', {timeZone: 'UTC',
+                            year: 'numeric'}).format(new Date('2026-01-01T00:00:00Z'))};
+                })()""")
+                self.assertEqual(result["text"], "世界")
+                self.assertIn("<result>世界</result>", result["xml"])
+                self.assertEqual(result["normalized"], "é")
+                self.assertEqual(result["upper"], "İSTANBUL")
+                self.assertEqual(result["date"], "2026")
+
     def test_standalone_media_navigation(self):
         with tempfile.TemporaryDirectory(prefix="lightview-test-") as directory:
             with browser(directory, "--private") as (path, process):

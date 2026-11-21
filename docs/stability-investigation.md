@@ -2089,3 +2089,48 @@ After preserving the passing evidence, the completed test monitors were
 retired. `monitor-retirement.json` records their inactive state and confirms
 that the browser and original control socket were left running. The final
 documentation update changes no application, patch, test or build code.
+
+
+## Ubuntu 26.04 compatibility qualification — November 21, 2026
+
+The 0.1.12 Ubuntu 24.04 archive cannot satisfy a normal 26.04 installation's
+ICU/FFmpeg ABI requirements. The 0.1.13 train adds distinct native application
+packages, a private ICU74/XML/XSLT ABI layer and a patched native gst-libav
+1.28.2 decoder using FFmpeg 8. The native decoder passed five strict allocation
+fixtures and six upstream suites. The original 24.04 engine/network/decoder
+combination remains unchanged in that platform's archive.
+
+Native 26.04 testing first exposed an early child-launch failure: killing the
+new sandboxed WebProcess before it sent credentials caused WebKit's UI-side
+`remoteProcessID` helper to call `g_error`. The additional 26.04 engine patch
+rejects the failed handshake through the existing failed-launch path. Ten
+repeated injections against the final staged engine observed that EOF path,
+kept the control endpoint usable and recovered through hard reset.
+
+Passing integration alone was insufficient. Both the launch-only engine and
+an initial capture-monitor correction reset during the YouTube / YouTube Music
+/ Facebook rotation, reporting an invalid GstDeviceProvider and allocator
+corruption. Cgroup OOM counters remained zero. A standalone control reproduces
+the stop-path fault in stock 26.04 GStreamer, including SIGSEGV and allocator
+abort variants. GStreamer 1.28 starts providers asynchronously; cancellation
+while another provider fails can corrupt its started-provider list. The final
+engine waits for the documented completion message in both capture-device
+initialization and WebAudio output-channel probing. The barrier control
+completed 200 cycles, and a real WebAudio regression covers Normal and Low
+Memory modes. See the runtime's Ubuntu 26.04 notes for source and build details.
+
+Both platform packages passed 47 real GTK/WebKit integration tests with no
+skips, 25 runner tests and four installer-preflight tests. The 26.04 package
+also passed six regressions through the optional nested-container launcher.
+Actual H.264 playback and inode-based mappings verified the final engine,
+JSC/Soup, native patched decoder and FFmpeg 8, with caller UID restored, zero
+effective capabilities and no_new_privs enabled in all three process roles.
+
+The final Normal-mode 26.04 rotation completed 34 healthy navigations across
+17 sites in 334.377 seconds. It preserved the main PID, socket and WebView
+generation, with zero resets, rebuilds, automation timeouts, maintenance
+recycles or OOM events; one navigation retry completed in the retained view.
+This is functional compatibility coverage. It does not establish a separate
+26.04 or Low Memory 24-hour pass, nor a resource-growth conclusion from such a
+short run. Raw failed and passing evidence is retained separately; sanitized
+counts and exact package/runtime hashes are in `release-validation-0.1.13.json`.

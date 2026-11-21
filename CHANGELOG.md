@@ -2,6 +2,30 @@
 
 ## Unreleased
 
+## 0.1.13 — 2026-11-21
+
+### Added
+
+- Separate Ubuntu 24.04 and 26.04 x86_64 release packages, with native
+  application builds and matching corresponding-source archives.
+- A private, checksum-pinned ICU74 and matching XML/XSLT compatibility layer
+  for the retained WebKit/JSC runtime on Ubuntu 26.04. System ICU78, XML and
+  FFmpeg packages remain installed at their native versions.
+- Port the video-frame allocation and metadata guards to Ubuntu 26.04's
+  gst-libav 1.28.2 / FFmpeg 8. The native decoder passes five strict fault cases
+  and six upstream suites; the unpatched control fails metadata verification.
+- On Ubuntu 26.04, reject failed child PID-credential handshakes through
+  WebKit's normal launch-failure path instead of aborting the UI process.
+  The original 24.04 engine remains unchanged.
+- Select WebKit's GStreamer 1.28 asynchronous device-monitor startup barrier
+  by runtime version, including when using a build made against older headers.
+- Installer OS/architecture and complete ELF dependency checks before writes,
+  plus an unprivileged `install.sh --check` preflight. Wrong-platform archives
+  fail with a clear diagnostic rather than installing an unusable browser.
+- Share one version header across the application, runtime launcher and
+  packagers, and separate GStreamer registries by platform and release.
+
+
 ## 0.1.12 — 2026-11-20
 
 ### Added

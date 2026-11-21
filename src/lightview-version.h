@@ -1,0 +1,4 @@
+#ifndef LIGHTVIEW_VERSION_H
+#define LIGHTVIEW_VERSION_H
+#define LIGHTVIEW_VERSION "0.1.13"
+#endif
