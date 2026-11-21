@@ -1,0 +1,11 @@
+{
+  "version": "2.52.6",
+  "prefix": "webkit-ubuntu26.04-0.1.13-v3",
+  "sha256": "60df9a79b1b9a79898ddcdb0d65059872b32873021f43954b8f3f17b5da687b1",
+  "base": "0.1.12 six-patch WebKit runtime",
+  "separate_24h_qualification": false,
+  "additional_patches": [
+    "child-launch-handshake-failure.patch",
+    "gstreamer-runtime-device-monitor.patch"
+  ]
+}

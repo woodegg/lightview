@@ -1,0 +1,269 @@
+{
+  "version": "0.1.13",
+  "validation_date_utc": "2026-11-21",
+  "application_change": "Shared release version header; browser logic otherwise unchanged from 0.1.12. Platform-specific native runtime launchers and packagers select dependencies.",
+  "platforms": [
+    {
+      "platform": "Ubuntu 24.04 x86_64",
+      "integration": {
+        "passed": true,
+        "tests": 47,
+        "skipped": 0,
+        "seconds": 281.256
+      },
+      "runner_tests": 25,
+      "installer_tests": 4,
+      "binary_sha256": {
+        "bin/lightview": "71b5111651fbe84e7516bc27f634e84fe384547c35b760b86107a289905c5845",
+        "libexec/lightview-bin": "d3dd54fb466059790e11d1450756d9a5f5600df0efbe93f9219e2960ca7c066e",
+        "libexec/lightview-sandbox-launcher": "572306060b17ce48f2874754017a496dfb883180c76c0a4141401a0b3b6a5f3f"
+      },
+      "runtime_files": {
+        "runtime-root/usr/local/lib/lightview-diagnostics/libav-width-guard-v3-1.24.1/lib/gstreamer-1.0/libgstlibav.so": "3cce94f75f71552a976a68cce8c29e6eff233ff1d9ffb2d235e3f03e6ff8392d",
+        "runtime-root/usr/local/lib/lightview-diagnostics/libsoup-redirect-budget-3.8.1-20261118/lib/libsoup-3.0.so.0.8.1": "37902860b806188489065d3a2576362fe3e0927fb29ea5c11cf6a2d92f68cfc5",
+        "runtime-root/usr/local/lib/lightview-diagnostics/webkit-preload-timeout-v6-candidate-2.52.6-20261117/lib/libwebkit2gtk-4.1.so.0.21.10": "b44a25c0e0c07f3bdef491bd98737d2ff892fd3c21c7d8ab16b54e537598efe9",
+        "runtime-root/usr/local/lib/lightview-diagnostics/webkit-preload-timeout-v6-candidate-2.52.6-20261117/libexec/webkit2gtk-4.1/WebKitGPUProcess": "78ae40f745bc009ff7f936c0217d9cb3c16c197b7252bff5b9380a99ee6f2d8e",
+        "runtime-root/usr/local/lib/lightview-diagnostics/webkit-preload-timeout-v6-candidate-2.52.6-20261117/libexec/webkit2gtk-4.1/WebKitNetworkProcess": "807d241846eea6b4f02b7632e960861627c51040afcef70e0581b2bba48e7c47",
+        "runtime-root/usr/local/lib/lightview-diagnostics/webkit-preload-timeout-v6-candidate-2.52.6-20261117/libexec/webkit2gtk-4.1/WebKitWebProcess": "47e1519d175ef224487f153ff34cdb4da00e04916d9c399acf839b818fc56249",
+        "runtime-root/usr/local/lib/lightview-diagnostics/webkit-source-loop-2.52.6/lib/libjavascriptcoregtk-4.1.so.0.10.14": "3384edf5852a4b1640cc7c61bb084f60e1b2c7bb503be7c73282dbfcfb7addee",
+        "runtime-root/usr/local/lib/lightview-diagnostics/webkit-source-loop-2.52.6/lib/webkit2gtk-4.1/injected-bundle/libwebkit2gtkinjectedbundle.so": "5b193425c1d440ddc41c3621d4891b9dbaa307f7c34d9d705fccf0743d15771d"
+      }
+    },
+    {
+      "platform": "Ubuntu 26.04 x86_64",
+      "integration": {
+        "passed": true,
+        "tests": 47,
+        "skipped": 0,
+        "seconds": 293.23
+      },
+      "runner_tests": 25,
+      "installer_tests": 4,
+      "native_decoder_fault_cases": 5,
+      "native_decoder_upstream_suites": 6,
+      "device_monitor": {
+        "negative_control": "allocator abort through gst_device_monitor_stop",
+        "barrier_cycles_passed": 200
+      },
+      "sandbox_helper": {
+        "helper_tests": 6,
+        "passed": true,
+        "media": {
+          "frames": 4,
+          "time": 0.264777775,
+          "width": 64,
+          "error": null,
+          "height": 64
+        },
+        "same_identity_and_no_reset": true
+      },
+      "mapping_verification": {
+        "by_inode": true,
+        "passed": true,
+        "roles": [
+          {
+            "role": "lightview-bin",
+            "private_mappings": [
+              "libsoup-redirect-budget-3.8.1-20261118/lib/libsoup-3.0.so.0.8.1",
+              "ubuntu26.04-compat-0.1.13/lib/libicudata.so.74.2",
+              "ubuntu26.04-compat-0.1.13/lib/libicui18n.so.74.2",
+              "ubuntu26.04-compat-0.1.13/lib/libicuuc.so.74.2",
+              "ubuntu26.04-compat-0.1.13/lib/libxml2.so.2.9.14",
+              "ubuntu26.04-compat-0.1.13/lib/libxslt.so.1.1.39",
+              "webkit-source-loop-2.52.6/lib/libjavascriptcoregtk-4.1.so.0.10.14",
+              "webkit-ubuntu26.04-0.1.13-v3/lib/libwebkit2gtk-4.1.so.0.21.10"
+            ],
+            "native_ffmpeg": [],
+            "identity": {
+              "Uid": [
+                "1000",
+                "1000",
+                "1000",
+                "1000"
+              ],
+              "Gid": [
+                "1000",
+                "1000",
+                "1000",
+                "1000"
+              ],
+              "CapEff": "0000000000000000",
+              "NoNewPrivs": "1"
+            }
+          },
+          {
+            "role": "WebKitNetworkPr",
+            "private_mappings": [
+              "libsoup-redirect-budget-3.8.1-20261118/lib/libsoup-3.0.so.0.8.1",
+              "ubuntu26.04-compat-0.1.13/lib/libicudata.so.74.2",
+              "ubuntu26.04-compat-0.1.13/lib/libicui18n.so.74.2",
+              "ubuntu26.04-compat-0.1.13/lib/libicuuc.so.74.2",
+              "ubuntu26.04-compat-0.1.13/lib/libxml2.so.2.9.14",
+              "ubuntu26.04-compat-0.1.13/lib/libxslt.so.1.1.39",
+              "webkit-source-loop-2.52.6/lib/libjavascriptcoregtk-4.1.so.0.10.14",
+              "webkit-ubuntu26.04-0.1.13-v3/lib/libwebkit2gtk-4.1.so.0.21.10",
+              "webkit-ubuntu26.04-0.1.13-v3/libexec/webkit2gtk-4.1/WebKitNetworkProcess"
+            ],
+            "native_ffmpeg": [],
+            "identity": {
+              "Uid": [
+                "1000",
+                "1000",
+                "1000",
+                "1000"
+              ],
+              "Gid": [
+                "1000",
+                "1000",
+                "1000",
+                "1000"
+              ],
+              "CapEff": "0000000000000000",
+              "NoNewPrivs": "1"
+            }
+          },
+          {
+            "role": "WebKitWebProces",
+            "private_mappings": [
+              "libav-width-guard-v3-1.28.2-ubuntu26.04/lib/gstreamer-1.0/libgstlibav.so",
+              "libsoup-redirect-budget-3.8.1-20261118/lib/libsoup-3.0.so.0.8.1",
+              "ubuntu26.04-compat-0.1.13/lib/libicudata.so.74.2",
+              "ubuntu26.04-compat-0.1.13/lib/libicui18n.so.74.2",
+              "ubuntu26.04-compat-0.1.13/lib/libicuuc.so.74.2",
+              "ubuntu26.04-compat-0.1.13/lib/libxml2.so.2.9.14",
+              "ubuntu26.04-compat-0.1.13/lib/libxslt.so.1.1.39",
+              "webkit-source-loop-2.52.6/lib/libjavascriptcoregtk-4.1.so.0.10.14",
+              "webkit-source-loop-2.52.6/lib/webkit2gtk-4.1/injected-bundle/libwebkit2gtkinjectedbundle.so",
+              "webkit-ubuntu26.04-0.1.13-v3/lib/libwebkit2gtk-4.1.so.0.21.10",
+              "webkit-ubuntu26.04-0.1.13-v3/libexec/webkit2gtk-4.1/WebKitWebProcess"
+            ],
+            "native_ffmpeg": [
+              "/usr/lib/x86_64-linux-gnu/libavcodec.so.62.11.100",
+              "/usr/lib/x86_64-linux-gnu/libavutil.so.60.8.100"
+            ],
+            "identity": {
+              "Uid": [
+                "1000",
+                "1000",
+                "1000",
+                "1000"
+              ],
+              "Gid": [
+                "1000",
+                "1000",
+                "1000",
+                "1000"
+              ],
+              "CapEff": "0000000000000000",
+              "NoNewPrivs": "1"
+            }
+          }
+        ]
+      },
+      "major_site_rotation": {
+        "navigations": 34,
+        "successful_navigations": 34,
+        "duration_seconds": 334.377,
+        "passed": true,
+        "survived": true,
+        "failure_reasons": [],
+        "load_errors": 0,
+        "unverified_documents": 0,
+        "blank_documents": 0,
+        "unexercised_sites": [],
+        "sites_with_resets": 0,
+        "reset_count_delta": 0,
+        "automation_timeout_count_delta": 0,
+        "navigation_view_rebuild_count_delta": 0,
+        "main_pid_stable": true,
+        "duration_target_seconds": null,
+        "duration_met": true,
+        "resource_analysis": {
+          "evaluable": false,
+          "complete_rounds": 2,
+          "post_warmup_hours": 0.0,
+          "sustained_growth_suspected": false,
+          "growth_reasons": [],
+          "metrics": {}
+        },
+        "failure_kind": null,
+        "final_engine_state": "ready",
+        "max_pss_mib": 2479.17,
+        "load_timeouts": 5,
+        "proactive_recycles": 0,
+        "network_recycles": 0,
+        "navigation_retries": 1,
+        "navigation_view_rebuilds": 0,
+        "max_control_clients": 1,
+        "max_page_requests_active": 0
+      },
+      "binary_sha256": {
+        "bin/lightview": "4142ede2c7f2870358543df9edf9ea4542ecdd3c01dcdec843911eae5368eac7",
+        "libexec/lightview-bin": "e2ad9d3a35f446a47dac991f4ea4881a2043787f071c0fa0ad20a2c97ec3a5c4",
+        "libexec/lightview-sandbox-launcher": "9fa4616c036a7abaaca7be4fcd2196e26ad7659f9e7cec94f6dd0cb8e3cdab0e"
+      },
+      "runtime_files": {
+        "runtime-root/usr/local/lib/lightview-diagnostics/libav-width-guard-v3-1.28.2-ubuntu26.04/lib/gstreamer-1.0/libgstlibav.so": "744ffbaded5bb045f1ba0d7e4b1fd3fb891dc6f9e92a7144a8ce3cebef1d19de",
+        "runtime-root/usr/local/lib/lightview-diagnostics/libsoup-redirect-budget-3.8.1-20261118/lib/libsoup-3.0.so.0.8.1": "37902860b806188489065d3a2576362fe3e0927fb29ea5c11cf6a2d92f68cfc5",
+        "runtime-root/usr/local/lib/lightview-diagnostics/ubuntu26.04-compat-0.1.13/lib/libexslt.so.0.8.21": "55b34c7d26ce9ca3d4fe1ba0ac963143cb58b57d2d32ed4167a49aa6fd1aae5c",
+        "runtime-root/usr/local/lib/lightview-diagnostics/ubuntu26.04-compat-0.1.13/lib/libicudata.so.74.2": "ddbb3718b8bd9cbd780e5ab08b4503c30a6c4fa0706ebe5d074ed6b596c1714e",
+        "runtime-root/usr/local/lib/lightview-diagnostics/ubuntu26.04-compat-0.1.13/lib/libicui18n.so.74.2": "3550b194eb2cf2e6f798f033eb9ca279d498c21296b4a18790ce158d2023e47b",
+        "runtime-root/usr/local/lib/lightview-diagnostics/ubuntu26.04-compat-0.1.13/lib/libicuuc.so.74.2": "7560aadde38e5f4237a47a1ddd5891f9b36768a77a60faae30beee003ac01901",
+        "runtime-root/usr/local/lib/lightview-diagnostics/ubuntu26.04-compat-0.1.13/lib/libxml2.so.2.9.14": "209e941be9eb2eb9ab36caaa0b81d1c6b36c8f5d7268c24f19e81039137e6485",
+        "runtime-root/usr/local/lib/lightview-diagnostics/ubuntu26.04-compat-0.1.13/lib/libxslt.so.1.1.39": "a4215f8406b17cad8aade7c5cccb65b62328e49879f4b1c735a69ae4a133a0fe",
+        "runtime-root/usr/local/lib/lightview-diagnostics/webkit-source-loop-2.52.6/lib/libjavascriptcoregtk-4.1.so.0.10.14": "3384edf5852a4b1640cc7c61bb084f60e1b2c7bb503be7c73282dbfcfb7addee",
+        "runtime-root/usr/local/lib/lightview-diagnostics/webkit-source-loop-2.52.6/lib/webkit2gtk-4.1/injected-bundle/libwebkit2gtkinjectedbundle.so": "5b193425c1d440ddc41c3621d4891b9dbaa307f7c34d9d705fccf0743d15771d",
+        "runtime-root/usr/local/lib/lightview-diagnostics/webkit-ubuntu26.04-0.1.13-v3/lib/libwebkit2gtk-4.1.so.0.21.10": "60df9a79b1b9a79898ddcdb0d65059872b32873021f43954b8f3f17b5da687b1",
+        "runtime-root/usr/local/lib/lightview-diagnostics/webkit-ubuntu26.04-0.1.13-v3/libexec/webkit2gtk-4.1/WebKitGPUProcess": "08d95224c5d40a8935da4161f6596b8a3dd9fd0690122bda419ef5c37eeceacf",
+        "runtime-root/usr/local/lib/lightview-diagnostics/webkit-ubuntu26.04-0.1.13-v3/libexec/webkit2gtk-4.1/WebKitNetworkProcess": "85c2fa25c2b99af87e95eafadb47a4ab52a91edc0759ca92ac299b244b4b27c3",
+        "runtime-root/usr/local/lib/lightview-diagnostics/webkit-ubuntu26.04-0.1.13-v3/libexec/webkit2gtk-4.1/WebKitWebProcess": "244f48060a32f58c98a03198686fca4f2b6c9e9c9e64c6ef3e1e9230f4205ae1"
+      },
+      "launch_failure_repetitions": {
+        "tests": 10,
+        "passed": true,
+        "handshake_eof_path_observed": 10,
+        "same_final_engine_as_full_suite": true
+      }
+    }
+  ],
+  "scope": {
+    "ubuntu24_04_previous_endurance": {
+      "version": "0.1.12-dev",
+      "duration_seconds": 86402.473,
+      "healthy_navigations": 11957,
+      "mode": "Normal",
+      "passing_runtime_bytes_retained_in_24_04_asset": true
+    },
+    "ubuntu26_04_separate_24h_pass": false,
+    "low_memory_separate_24h_pass": false,
+    "short_rotation_is_not_a_leak_qualification": true
+  },
+  "pre_release_failures": [
+    {
+      "candidate": "Initial 26.04 dependency adaptation",
+      "result": "43 passing integration tests, one forced-child-launch UI abort and one skipped chooser test; xdotool installed and launch guard added."
+    },
+    {
+      "candidate": "26.04 launch guard with native decoder",
+      "result": "46 integration tests passed, but major-site rotation reset on Facebook with invalid GstDeviceProvider / allocator corruption; no cgroup OOM."
+    },
+    {
+      "candidate": "26.04 capture-only startup barrier",
+      "result": "46 integration tests passed, but major-site rotation still reset; separate WebAudio monitor path identified."
+    },
+    {
+      "candidate": "Final 26.04 engine with both startup barriers",
+      "result": "47 integration tests, 10 launch-failure repetitions and 34 major-site navigations passed; one navigation retry, zero resets/rebuilds/automation timeouts."
+    }
+  ],
+  "installation": {
+    "platform_guard_before_writes": true,
+    "unprivileged_preflight": true,
+    "missing_transitive_elf_dependency_regression": true,
+    "system_packages_downgraded": false,
+    "sandbox_disabled": false,
+    "whole_container_privileged": false,
+    "staged_runtime_mount_hides_host_copies": true
+  },
+  "production_containers_modified": false
+}

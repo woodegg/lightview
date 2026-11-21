@@ -1,0 +1,38 @@
+--- a/Source/WebCore/platform/mediastream/gstreamer/GStreamerCaptureDeviceManager.cpp
++++ b/Source/WebCore/platform/mediastream/gstreamer/GStreamerCaptureDeviceManager.cpp
+@@ -339,13 +339,15 @@
+             return;
+         }
+ 
+-#if GST_CHECK_VERSION(1, 28, 0)
+-        {
++        // GStreamer 1.28 starts providers asynchronously. Select this barrier
++        // from the runtime version too when built against older stable headers.
++        if (gst_check_version(1, 28, 0)) {
+             auto bus = adoptGRef(gst_device_monitor_get_bus(m_deviceMonitor.get()));
+-            [[maybe_unused]] auto message = adoptGRef(gst_bus_timed_pop_filtered(bus.get(), GST_CLOCK_TIME_NONE, GST_MESSAGE_DEVICE_MONITOR_STARTED));
++            // Public GstMessageType ABI, introduced in 1.28.
++            constexpr auto monitorStarted = static_cast<GstMessageType>(GST_MESSAGE_EXTENDED + 9);
++            [[maybe_unused]] auto message = adoptGRef(gst_bus_timed_pop_filtered(bus.get(), GST_CLOCK_TIME_NONE, monitorStarted));
+             GST_DEBUG_OBJECT(m_deviceMonitor.get(), "Device provider(s) successfully started");
+         }
+-#endif
+ 
+         monitorBus = true;
+     }
+--- a/Source/WebCore/platform/audio/gstreamer/AudioDestinationGStreamer.cpp
++++ b/Source/WebCore/platform/audio/gstreamer/AudioDestinationGStreamer.cpp
+@@ -72,6 +72,13 @@
+         auto caps = adoptGRef(gst_caps_new_empty_simple("audio/x-raw"));
+         gst_device_monitor_add_filter(monitor.get(), "Audio/Sink", caps.get());
+         bool started = gst_device_monitor_start(monitor.get());
++        // 1.28 starts device providers asynchronously. Wait before enumerating
++        // and stopping the monitor, including with older build-time headers.
++        if (started && gst_check_version(1, 28, 0)) {
++            auto bus = adoptGRef(gst_device_monitor_get_bus(monitor.get()));
++            constexpr auto monitorStarted = static_cast<GstMessageType>(GST_MESSAGE_EXTENDED + 9);
++            [[maybe_unused]] auto message = adoptGRef(gst_bus_timed_pop_filtered(bus.get(), GST_CLOCK_TIME_NONE, monitorStarted));
++        }
+         auto* devices = gst_device_monitor_get_devices(monitor.get());
+         while (devices) {
+             auto device = adoptGRef(GST_DEVICE_CAST(devices->data));

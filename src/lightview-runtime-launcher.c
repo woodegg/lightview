@@ -4,12 +4,24 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include "lightview-version.h"
 
 #define RUNTIME "/usr/local/lib/lightview-diagnostics/"
-#define LIBRARIES RUNTIME "webkit-preload-timeout-v6-candidate-2.52.6-20261117/lib:" \
+#ifdef LIGHTVIEW_UBUNTU_2604
+#define RUNTIME_PLATFORM "ubuntu26.04"
+#define ENGINE RUNTIME "webkit-ubuntu26.04-0.1.13-v3/lib:"
+#define COMPAT RUNTIME "ubuntu26.04-compat-" LIGHTVIEW_VERSION "/lib:"
+#define PLUGINS RUNTIME "libav-width-guard-v3-1.28.2-ubuntu26.04/lib/gstreamer-1.0"
+#else
+#define RUNTIME_PLATFORM "ubuntu24.04"
+#define ENGINE RUNTIME "webkit-preload-timeout-v6-candidate-2.52.6-20261117/lib:"
+#define COMPAT ""
+#define PLUGINS RUNTIME "libav-width-guard-v3-1.24.1/lib/gstreamer-1.0"
+#endif
+#define LIBRARIES COMPAT ENGINE \
     RUNTIME "webkit-source-loop-2.52.6/lib:" \
     RUNTIME "libsoup-redirect-budget-3.8.1-20261118/lib"
-#define PLUGINS RUNTIME "libav-width-guard-v3-1.24.1/lib/gstreamer-1.0"
+#define REGISTRY "lightview-gstreamer-" LIGHTVIEW_VERSION "-" RUNTIME_PLATFORM ".bin"
 #define BROWSER "/usr/local/libexec/lightview-bin"
 
 int main(int argc, char **argv)
@@ -24,10 +36,10 @@ int main(int argc, char **argv)
     const char *home = getenv("HOME");
     char *registry = NULL;
     if (cache && cache[0] == '/') {
-        if (asprintf(&registry, "%s/lightview-gstreamer-0.1.12.bin", cache) < 0)
+        if (asprintf(&registry, "%s/" REGISTRY, cache) < 0)
             registry = NULL;
     } else if (home && home[0] == '/') {
-        if (asprintf(&registry, "%s/.cache/lightview-gstreamer-0.1.12.bin", home) < 0)
+        if (asprintf(&registry, "%s/.cache/" REGISTRY, home) < 0)
             registry = NULL;
     }
     if (!registry || setenv("GST_REGISTRY", registry, 1) != 0) {
