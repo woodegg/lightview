@@ -1,0 +1,49 @@
+--- a/Source/WebKit/Platform/IPC/glib/ConnectionGLib.cpp
++++ b/Source/WebKit/Platform/IPC/glib/ConnectionGLib.cpp
+@@ -513,12 +513,16 @@
+     GRefPtr<GUnixConnection> connection = adoptGRef(G_UNIX_CONNECTION(g_object_new(G_TYPE_UNIX_CONNECTION, "socket", socket, nullptr)));
+     GUniqueOutPtr<GError> error;
+     GRefPtr<GCredentials> credentials = adoptGRef(g_unix_connection_receive_credentials(connection.get(), nullptr, &error.outPtr()));
+-    if (!credentials)
+-        g_error("Connection: failed to receive credentials: %s", error->message);
++    if (!credentials) {
++        g_warning("Connection: child credentials unavailable: %s", error->message);
++        return 0;
++    }
+ 
+     pid_t processID = g_credentials_get_unix_pid(credentials.get(), &error.outPtr());
+-    if (error)
+-        g_error("Connection: failed to get pid from credentials: %s", error->message);
++    if (error) {
++        g_warning("Connection: child pid unavailable: %s", error->message);
++        return 0;
++    }
+ 
+     return processID;
+ }
+--- a/Source/WebKit/UIProcess/Launcher/glib/ProcessLauncherGLib.cpp
++++ b/Source/WebKit/UIProcess/Launcher/glib/ProcessLauncherGLib.cpp
+@@ -246,13 +246,17 @@
+         // intermediate process. And do it without blocking, because process launching is slow.
+         g_socket_set_blocking(socket.get(), FALSE);
+         m_socketMonitor.start(socket.get(), G_IO_IN, RunLoop::mainSingleton(), nullptr, [protectedThis = Ref { *this }, this, socket](GIOCondition condition) mutable -> gboolean {
+-            if (!(condition & G_IO_IN))
+-                g_error("Failed to read pid from child process");
+-
+-            m_processID = IPC::Connection::remoteProcessID(socket.get());
+-            RELEASE_ASSERT(m_processID);
+-
++            m_processID = condition & G_IO_IN ? IPC::Connection::remoteProcessID(socket.get()) : 0;
+             m_socketMonitor.stop();
++
++            // A sandboxed child can exit before sending its credentials. Reject
++            // the unauthenticated connection through the normal launch-failure
++            // path instead of terminating the UI process.
++            if (!m_processID) {
++                g_warning("WebKit child exited before its pid handshake completed");
++                didFinishLaunchingProcess(0, { });
++                return G_SOURCE_REMOVE;
++            }
+ 
+             didFinishLaunchingProcess(m_processID, IPC::Connection::Identifier { { g_socket_get_fd(socket.get()), UnixFileDescriptor::Duplicate } });
+             return G_SOURCE_REMOVE;

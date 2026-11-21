@@ -3,6 +3,10 @@ PKG_CONFIG ?= pkg-config
 PREFIX ?= /usr/local
 PKGS = webkit2gtk-4.1 json-glib-1.0 gio-unix-2.0
 ICON_SIZES = 16 24 32 48 64 128 256
+UBUNTU_VERSION := $(shell . /etc/os-release; printf '%s' "$$VERSION_ID")
+ifeq ($(UBUNTU_VERSION),26.04)
+RUNTIME_CPPFLAGS = -DLIGHTVIEW_UBUNTU_2604
+endif
 CPPFLAGS += $(shell $(PKG_CONFIG) --cflags $(PKGS))
 CFLAGS ?= -Os -g
 CFLAGS += -std=c11 -Wall -Wextra -Wpedantic -Wformat=2 \
@@ -16,7 +20,7 @@ check-deps:
 	@$(PKG_CONFIG) --atleast-version=2.40 webkit2gtk-4.1 || { echo 'Install WebKitGTK 4.1 development files (engine >= 2.40).'; exit 1; }
 	@$(PKG_CONFIG) --exists $(PKGS)
 
-build/lightview: src/lightview.c build/lightview-resources.o | check-deps
+build/lightview: src/lightview.c src/lightview-version.h build/lightview-resources.o | check-deps
 	mkdir -p build
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) -o $@ src/lightview.c build/lightview-resources.o $(LDLIBS)
 
@@ -31,12 +35,13 @@ build/lightview-sandbox-launcher: src/lightview-sandbox-launcher.c
 	mkdir -p build
 	$(CC) $(CFLAGS) -o $@ $<
 
-build/lightview-runtime-launcher: src/lightview-runtime-launcher.c
+build/lightview-runtime-launcher: src/lightview-runtime-launcher.c src/lightview-version.h
 	mkdir -p build
-	$(CC) $(CFLAGS) -o $@ $<
+	$(CC) $(RUNTIME_CPPFLAGS) $(CFLAGS) -o $@ $<
 
 check: build/lightview
 	python3 tests/stability_runner.py
+	python3 tests/release_packaging.py
 	dbus-run-session -- xvfb-run -a python3 tests/integration.py
 
 install: build/lightview build/lightview-sandbox-launcher

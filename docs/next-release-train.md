@@ -8,7 +8,7 @@ Current formal release: 0.1.12, published on 2026-11-20 with LTV-017 and the
 qualified private runtime bundle. Its strict Normal-mode 24-hour endurance
 gate passed on 2026-11-19. Package installation and integration verification
 are recorded in the release evidence. Earlier requirements shipped in 0.1.8
-through 0.1.11. No next-train requirements have been locked yet.
+through 0.1.11. LTV-018 is locked for the 0.1.13 compatibility patch.
 
 ## LTV-008 — Version information button
 
@@ -599,3 +599,24 @@ Acceptance:
 - A GPU-restricted-container rotation has no GL dispatch assertion or hidden
   WebKit subprocess crash, while a host with an accessible render node is not
   forced into software rendering.
+
+## LTV-018 — Ubuntu 26.04 release compatibility
+
+Status: implementation and native platform verification for 0.1.13.
+
+Provide separate native Ubuntu 24.04 and 26.04 x86_64 artifacts. Preserve the
+qualified engine/network corrections, handle early child-launch failures,
+and resolve ICU/XML ABI differences
+privately while using the native 26.04 GStreamer/FFmpeg stack. Do not downgrade
+system packages, disable WebKit sandboxing or change automation endpoints.
+
+Acceptance:
+
+- Native application and launcher builds, complete ELF dependency closure and
+  real GTK/automation regression coverage on both distributions.
+- Preserve decoder metadata guards with strict fault and upstream tests on
+  the 26.04 implementation; verify media playback and XML/XSLT interoperability.
+- Reject wrong-platform and missing-dependency installations before writes;
+  provide an unprivileged preflight and matching source/license archives.
+- Publish the platform matrix and distinguish functional coverage from the
+  existing Ubuntu 24.04 Normal-mode 24-hour qualification.

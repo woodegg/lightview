@@ -1,0 +1,21 @@
+{
+  "version": "1.28.2",
+  "ubuntu_source_package": "gst-libav1.0",
+  "ubuntu_source_version": "1.28.2-1",
+  "prefix": "libav-width-guard-v3-1.28.2-ubuntu26.04",
+  "sha256": "744ffbaded5bb045f1ba0d7e4b1fd3fb891dc6f9e92a7144a8ce3cebef1d19de",
+  "system_ffmpeg_abi": "libavcodec62/libavformat62/libavfilter11/libavutil60",
+  "build_options": [
+    "--buildtype=debugoptimized",
+    "--wrap-mode=nofallback",
+    "-Ddoc=disabled",
+    "-Dtests=enabled",
+    "-Dc_args=['-DFFMPEG_LIBDIR=\"/usr/lib/x86_64-linux-gnu\"']"
+  ],
+  "validation": {
+    "strict_fault_cases": 5,
+    "frames_per_success_case": 288,
+    "upstream_suites": 6,
+    "system_negative_control": "mismatched output metadata rejected by strict verifier at frame 13; fatal upstream check not triggered by this fixture"
+  }
+}

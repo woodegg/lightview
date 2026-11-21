@@ -14,19 +14,25 @@ and services that require another browser may not work.
 
 ## Official release
 
-The [0.1.12 release](https://github.com/woodegg/lightview/releases/tag/v0.1.12)
-provides an Ubuntu 24.04 x86_64 package with the qualified private WebKitGTK,
-JavaScriptCore, libsoup and video-decoder libraries, plus corresponding sources
-and checksums. See [installation and release instructions](docs/releasing.md).
-The installed runtime completed a strict Normal-mode 24-hour major-site test
-with 11,957 healthy navigations and zero resets, automation timeouts or OOM
-events. This is coverage of the recorded workload, not every website or DRM
-service. Low Memory mode has functional regression coverage, not a separate
-24-hour qualification.
+The [0.1.13 release](https://github.com/woodegg/lightview/releases/tag/v0.1.13)
+provides separate Ubuntu **24.04** and **26.04** x86_64 packages. Download the
+archive matching your operating system; the installer checks compatibility
+before changing files. Both include private WebKitGTK, JavaScriptCore and
+libsoup libraries. The 26.04 engine also handles children exiting during the
+startup credential handshake without aborting the browser, and waits for
+GStreamer 1.28 asynchronous device-monitor startup. The 26.04 package adds a private ICU/XML compatibility layer
+and a decoder built for native GStreamer 1.28 / FFmpeg 8, without downgrading
+system libraries. See [installation and release instructions](docs/releasing.md).
+
+The original 24.04 engine/network runtime completed a strict Normal-mode 24-hour
+major-site test on Ubuntu 24.04 with 11,957 healthy navigations and zero resets,
+automation timeouts or OOM events. This result does not constitute a separate
+Ubuntu 26.04 or Low Memory 24-hour qualification. Platform-specific regression
+coverage is recorded with each release.
 
 ## Build and run
 
-On Ubuntu 24.04 or a Debian-family distribution with WebKitGTK >= 2.40:
+On Ubuntu 24.04, Ubuntu 26.04, or a Debian-family distribution with WebKitGTK >= 2.40:
 
 ```sh
 sudo apt-get install build-essential pkg-config libwebkit2gtk-4.1-dev libjson-glib-dev
