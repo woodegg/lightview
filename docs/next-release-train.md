@@ -4,12 +4,13 @@ This document records accepted requirements for the next Lightview release.
 Items remain requirements until implementation, validation, and release work
 are completed.
 
-Current release train: 0.1.13, the Ubuntu 24.04 / 26.04 compatibility patch
-for LTV-018. Both platforms passed native package and browser regression QA.
-The preceding 0.1.12 Ubuntu 24.04 engine/network/decoder combination passed its
+Current formal release: 0.1.13, published on 2026-11-21 with LTV-018 and
+separate Ubuntu 24.04 / 26.04 packages. Both platforms passed native package
+and browser regression QA. The preceding 0.1.12 Ubuntu 24.04 runtime passed its
 strict Normal-mode 24-hour endurance gate on 2026-11-19; the new 26.04 engine
 and decoder do not have a separate 24-hour qualification. Public validation
-is recorded in `docs/release-validation-0.1.13.json`.
+is recorded in `docs/release-validation-0.1.13.json`. No next-train requirements
+have been locked yet.
 
 ## LTV-008 — Version information button
 
@@ -603,7 +604,7 @@ Acceptance:
 
 ## LTV-018 — Ubuntu 26.04 release compatibility
 
-Status: implemented and validated for 0.1.13; publication follows package verification.
+Status: released in 0.1.13.
 
 Provide separate native Ubuntu 24.04 and 26.04 x86_64 artifacts. Preserve the
 qualified engine/network corrections, handle early child-launch failures,
