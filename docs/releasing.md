@@ -2,8 +2,9 @@
 
 Lightview 0.1.13 ships the application and the private WebKitGTK, JavaScriptCore,
 and libsoup runtime based on the passing Ubuntu 24.04 Normal-mode endurance run.
-The 24.04 engine/decoder are retained; the 26.04 engine adds a startup-handshake
-failure guard and its decoder is built natively for FFmpeg 8.
+Ubuntu 24.04 keeps the previous engine and decoder. The Ubuntu 26.04 engine
+handles failed child startup and waits for asynchronous GStreamer device
+discovery. Its decoder is built natively for FFmpeg 8.
 Building Lightview alone still uses distribution libraries. A binary-only
 application update does not install the runtime fixes.
 
@@ -85,7 +86,7 @@ the corresponding upstream archives, patches and build notes are published as
      --output dist/release-0.1.13
    ```
 
-Build the 26.04 application and runtime launcher natively on Ubuntu 26.04,
+   Build the 26.04 application and runtime launcher natively on Ubuntu 26.04,
    then repeat both commands with `--platform ubuntu26.04` and a fresh output
    directory. The binary packager refuses a mismatched native build host. Its
    source cache must include the native decoder and pinned compatibility

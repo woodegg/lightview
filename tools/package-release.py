@@ -272,7 +272,11 @@ def main():
         "engine_qualification": {"run_id": "20261118-063038", "duration_seconds": 86402.473,
                           "healthy_navigations": 11957, "sites": 17, "mode": "Normal",
                           "tested_platform": "ubuntu24.04",
-                          "scope": "Ubuntu 24.04 combination only; Ubuntu 26.04 adds a child-launch guard and native decoder and is not separately 24-hour qualified"},
+                          "scope": (
+                              "The Ubuntu 24.04 runtime completed the 24-hour test. "
+                              "Ubuntu 26.04 received functional and short navigation coverage "
+                              "with child-launch and device-monitor fixes and a native decoder."
+                          )},
         "installation_prefix": "/usr/local",
         "runtime_paths": "Compiled private prefixes are preserved; system libraries are not replaced.",
     }
